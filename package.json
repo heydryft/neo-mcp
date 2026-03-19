@@ -3,22 +3,33 @@
   "version": "1.0.0",
   "description": "MCP server with LinkedIn, Twitter/X, WhatsApp integrations + self-extending tool creation",
   "type": "module",
-  "scripts": {
-    "start": "node --import tsx/esm src/server.ts",
-    "build": "tsc",
-    "dev": "node --import tsx/esm --watch src/server.ts"
-  },
+  "main": "dist/server.js",
   "bin": {
-    "neo-mcp": "./bin/neo-mcp"
+    "neo-mcp": "dist/server.js"
   },
+  "files": [
+    "dist",
+    "extension",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc && node dist/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heydryft/neo-mcp.git"
+  },
+  "homepage": "https://github.com/heydryft/neo-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^12.8.0",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
-    "ws": "^8.19.0",
-    "tsx": "^4.21.0"
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

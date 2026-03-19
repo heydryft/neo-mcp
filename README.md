@@ -12,40 +12,32 @@ MCP server that gives Claude (or any AI) access to LinkedIn, Twitter/X, WhatsApp
 
 ## Install
 
-### 1. Install the MCP server
+### 1. Add to Claude Desktop
 
-```bash
-git clone https://github.com/user/neo-mcp.git
-cd neo-mcp
-npm install
-```
-
-### 2. Install the Chrome extension
-
-1. Open `chrome://extensions` in Chrome
-2. Enable **Developer mode** (top right toggle)
-3. Click **Load unpacked**
-4. Select the `extension/` folder from this repo
-
-You'll see the Neo Bridge icon in your extensions bar. It connects automatically.
-
-### 3. Add to Claude
-
-Add this to your Claude config (`~/.claude/settings.json` or Claude Desktop settings):
+Add this to your Claude Desktop MCP config:
 
 ```json
 {
   "mcpServers": {
     "neo": {
       "command": "npx",
-      "args": ["tsx", "src/server.ts"],
-      "cwd": "/absolute/path/to/neo-mcp"
+      "args": ["-y", "github:heydryft/neo-mcp"]
     }
   }
 }
 ```
 
-That's it. Claude now has all the tools.
+That's it. Claude installs and runs it automatically.
+
+### 2. Install the Chrome extension
+
+1. Clone the repo (just for the extension folder): `git clone https://github.com/heydryft/neo-mcp.git`
+2. Open `chrome://extensions` in Chrome
+3. Enable **Developer mode** (top right toggle)
+4. Click **Load unpacked**
+5. Select the `extension/` folder
+
+You'll see the Neo Bridge icon in your extensions bar. It connects automatically.
 
 ## Tools
 

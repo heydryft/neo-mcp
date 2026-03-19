@@ -13,10 +13,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import * as linkedin from "./integrations/linkedin";
-import * as twitter from "./integrations/twitter";
-import * as db from "./db";
-import { browserCommand, startBridge, isBridgeConnected } from "./bridge";
+import * as linkedin from "./integrations/linkedin.js";
+import * as twitter from "./integrations/twitter.js";
+import * as db from "./db.js";
+import { browserCommand, startBridge, isBridgeConnected } from "./bridge.js";
 
 const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user's real accounts. You can read their LinkedIn, post tweets, send WhatsApp messages, and interact with ANY website they're logged into — all through their actual browser session. No API keys needed. You extract auth tokens from the browser once, then make direct API calls.
 
@@ -378,7 +378,7 @@ server.tool(
     "Connect to WhatsApp. Returns a QR code to scan on first use. Auto-reconnects after that.",
     {},
     async () => {
-        const wa = await import("./integrations/whatsapp");
+        const wa = await import("./integrations/whatsapp.js");
         await wa.connect();
         return { content: [{ type: "text", text: "WhatsApp connected." }] };
     }
@@ -389,7 +389,7 @@ server.tool(
     "List WhatsApp chats with last message and unread count.",
     { limit: z.number().optional() },
     async ({ limit }) => {
-        const wa = await import("./integrations/whatsapp");
+        const wa = await import("./integrations/whatsapp.js");
         const chats = await wa.getChats(limit || 30);
         return { content: [{ type: "text", text: json(chats) }] };
     }
@@ -403,7 +403,7 @@ server.tool(
         limit: z.number().optional(),
     },
     async ({ chat, limit }) => {
-        const wa = await import("./integrations/whatsapp");
+        const wa = await import("./integrations/whatsapp.js");
         const messages = await wa.readMessages(chat, limit || 30);
         return { content: [{ type: "text", text: json(messages) }] };
     }
@@ -417,7 +417,7 @@ server.tool(
         text: z.string(),
     },
     async ({ to, text }) => {
-        const wa = await import("./integrations/whatsapp");
+        const wa = await import("./integrations/whatsapp.js");
         const result = await wa.sendMessage(to, text);
         return { content: [{ type: "text", text: json(result) }] };
     }
@@ -557,7 +557,7 @@ server.tool(
     async () => {
         const tools = db.getCustomTools();
         if (tools.length === 0) return { content: [{ type: "text", text: "No custom tools created yet." }] };
-        const lines = tools.map((t) => `${t.name} (${t.service || "general"}) — ${t.description}`);
+        const lines = tools.map((t: any) => `${t.name} (${t.service || "general"}) — ${t.description}`);
         return { content: [{ type: "text", text: lines.join("\n") }] };
     }
 );
