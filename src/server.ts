@@ -18,10 +18,32 @@ import * as twitter from "./integrations/twitter";
 import * as db from "./db";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge";
 
-const server = new McpServer({
-    name: "neo",
-    version: "1.0.0",
-});
+const NEO_INSTRUCTIONS = `Neo gives you access to the user's LinkedIn, Twitter/X, WhatsApp, and any website they're logged into.
+
+## First-time setup for a service
+1. Call extract_auth with the service name (e.g. "linkedin") — this grabs auth tokens from the user's browser
+2. Then use the service's tools normally (linkedin_my_posts, twitter_user_tweets, etc.)
+3. Tokens are stored permanently — you only need to extract once
+
+## For services without built-in tools
+Use the meta-tools to build integrations on the fly:
+1. extract_auth("servicename") — grab tokens
+2. discover_api(start, navigate: "site.com") — capture network traffic
+3. discover_api(list) — see all API endpoints the site uses
+4. authenticated_fetch(url) — call endpoints as the logged-in user
+5. create_tool(...) — write a reusable tool with JavaScript so you don't repeat this next time
+
+## Key points
+- LinkedIn and Twitter tokens work for direct API calls — no browser needed after extraction
+- Twitter query IDs are extracted at runtime from their JS bundle (they rotate constantly)
+- WhatsApp needs whatsapp_connect first (QR code scan on first use, auto-reconnects after)
+- create_tool makes REAL tools that persist across restarts — use it whenever you discover a useful API pattern
+- Collections let you store structured data with full-text search — use them to save API patterns, scraped data, etc.`;
+
+const server = new McpServer(
+    { name: "neo", version: "1.0.0" },
+    { instructions: NEO_INSTRUCTIONS },
+);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
