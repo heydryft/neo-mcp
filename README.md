@@ -37,8 +37,8 @@ Add this to your Claude config (`~/.claude/settings.json` or Claude Desktop sett
 {
   "mcpServers": {
     "neo": {
-      "command": "node",
-      "args": ["--import", "tsx/esm", "src/server.ts"],
+      "command": "npx",
+      "args": ["tsx", "src/server.ts"],
       "cwd": "/absolute/path/to/neo-mcp"
     }
   }
