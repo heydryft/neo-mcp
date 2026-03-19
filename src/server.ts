@@ -18,7 +18,9 @@ import * as twitter from "./integrations/twitter";
 import * as db from "./db";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge";
 
-const NEO_INSTRUCTIONS = `Neo gives you access to the user's LinkedIn, Twitter/X, WhatsApp, and any website they're logged into.
+const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user's real accounts. You can read their LinkedIn, post tweets, send WhatsApp messages, and interact with ANY website they're logged into — all through their actual browser session. No API keys needed. You extract auth tokens from the browser once, then make direct API calls.
+
+You're not limited to pre-built integrations. If the user asks you to connect to a service Neo doesn't have tools for, you can discover its API, build tools for it, and register them permanently — all at runtime.
 
 ## First-time setup for a service
 1. Call extract_auth with the service name (e.g. "linkedin") — this grabs auth tokens from the user's browser
