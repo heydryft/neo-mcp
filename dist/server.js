@@ -96,14 +96,9 @@ This is the meta-tool for building integrations on the fly. If no pre-built tool
     const text = typeof result === "string" ? result : json(result);
     return { content: [{ type: "text", text: text.slice(0, 50000) }] };
 });
-server.tool("discover_api", `Discover API endpoints a website uses by capturing network traffic.
-1. start (+ navigate to page) → captures all HTTP requests the page makes
-2. Interact with the page to trigger API calls
-3. list → shows all captured endpoints (method, status, URL)
-4. Use authenticated_fetch to call the discovered endpoints
-5. Save working patterns to a collection (collection_create) so you don't rediscover next time`, {
-    action: z.enum(["start", "stop", "list"]).describe("start capture, stop capture, or list captured requests"),
-    filters: z.array(z.string()).optional().describe('URL substrings to capture, e.g. ["api.", "graphql"]'),
+server.tool("network_capture", "Start/stop/clear network request capture in the browser. Use network_requests to list and network_request_detail to inspect.", {
+    action: z.enum(["start", "stop", "clear"]),
+    filters: z.array(z.string()).optional().describe('URL substrings to capture, e.g. ["api.", "graphql"]. Empty = all.'),
     navigate: z.string().optional().describe("URL to navigate to after starting capture"),
 }, async ({ action, filters, navigate }) => {
     if (!isBridgeConnected()) {
@@ -111,20 +106,40 @@ server.tool("discover_api", `Discover API endpoints a website uses by capturing 
     }
     if (action === "start") {
         await browserCommand("network_start_capture", { filters: filters || [] });
-        if (navigate) {
+        if (navigate)
             await browserCommand("navigate", { url: navigate });
-        }
-        return { content: [{ type: "text", text: "Capture started. Interact with the page, then call discover_api with action='list'." }] };
+        return { content: [{ type: "text", text: "Capture started." }] };
     }
     if (action === "stop") {
         await browserCommand("network_stop_capture");
         return { content: [{ type: "text", text: "Capture stopped." }] };
     }
-    // list
-    const data = await browserCommand("network_list", { limit: 100 });
+    await browserCommand("network_clear");
+    return { content: [{ type: "text", text: "Capture cleared." }] };
+});
+server.tool("network_requests", "List captured network requests. Returns id, method, status, URL. Use network_request_detail to get full headers/body for a specific request.", {
+    filter: z.string().optional().describe("Filter by URL/method/type substring"),
+    limit: z.number().optional(),
+}, async ({ filter, limit }) => {
+    if (!isBridgeConnected()) {
+        return { content: [{ type: "text", text: "Browser extension not connected." }] };
+    }
+    const data = await browserCommand("network_list", { filter, limit: limit || 100 });
     const entries = data?.requests || [];
-    const lines = entries.map((r) => `${r.method} ${r.status || "?"} ${r.url}`);
+    const lines = entries.map((r) => `[${r.id}] ${r.method} ${r.status || "?"} ${r.url}`);
     return { content: [{ type: "text", text: lines.length > 0 ? `${data.total} requests captured:\n${lines.join("\n")}` : "No requests captured." }] };
+});
+server.tool("network_request_detail", "Get full details for a captured request — request headers, response headers, and body. Pass the id from network_requests.", {
+    id: z.string().describe("Request ID from network_requests"),
+}, async ({ id }) => {
+    if (!isBridgeConnected()) {
+        return { content: [{ type: "text", text: "Browser extension not connected." }] };
+    }
+    const detail = await browserCommand("network_get_request", { id });
+    return { content: [{ type: "text", text: json(detail) }] };
+});
+server.tool("bridge_status", "Check if the Neo Browser Bridge extension is connected.", {}, async () => {
+    return { content: [{ type: "text", text: isBridgeConnected() ? "Connected." : "Not connected. Make sure Chrome is running with the Neo Bridge extension." }] };
 });
 // ── LinkedIn ─────────────────────────────────────────────────────────────────
 server.tool("linkedin_profile", "Get a LinkedIn user's profile. Pass the vanity name (URL slug, e.g. 'nirupambhowmick').", { vanity_name: z.string() }, async ({ vanity_name }) => {
