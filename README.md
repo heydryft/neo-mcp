@@ -1,20 +1,14 @@
 # Neo MCP
 
-MCP server that gives Claude (or any AI) access to LinkedIn, Twitter/X, WhatsApp, and any website you're logged into. The AI can also create its own integrations at runtime.
+MCP server that gives Claude access to your real accounts — LinkedIn, Twitter/X, WhatsApp, and any website you're logged into. No API keys. No OAuth. It grabs auth tokens straight from your browser.
 
-## What it does
-
-- **LinkedIn** — Read your posts + engagement, read feed, create posts, search people, list connections
-- **Twitter/X** — Read tweets + engagement, read timeline, post tweets, search
-- **WhatsApp** — Send/read messages, list chats, contact lookup
-- **Any website** — Extract auth tokens from your browser, make authenticated API calls as the logged-in user
-- **Self-extending** — The AI can create new tools at runtime that persist across restarts. Tell it to "build me a Notion integration" and it will.
+The AI can also build its own integrations at runtime for any service you use.
 
 ## Install
 
 ### 1. Add to Claude Desktop
 
-Add this to your Claude Desktop MCP config:
+Add to your Claude Desktop MCP config (`Settings > Developer > Edit Config`):
 
 ```json
 {
@@ -27,42 +21,39 @@ Add this to your Claude Desktop MCP config:
 }
 ```
 
-That's it. Claude installs and runs it automatically.
+Restart Claude Desktop. Done.
 
 ### 2. Install the Chrome extension
 
-1. Clone the repo (just for the extension folder): `git clone https://github.com/heydryft/neo-mcp.git`
-2. Open `chrome://extensions` in Chrome
-3. Enable **Developer mode** (top right toggle)
-4. Click **Load unpacked**
-5. Select the `extension/` folder
+The extension is what lets Neo access your browser sessions.
 
-You'll see the Neo Bridge icon in your extensions bar. It connects automatically.
+1. `git clone https://github.com/heydryft/neo-mcp.git`
+2. Open `chrome://extensions`
+3. Enable **Developer mode** (top right)
+4. Click **Load unpacked** → select the `extension/` folder
 
-## Tools
+The Neo Bridge icon appears in your toolbar. It auto-connects to the MCP server.
 
-### Auth & Fetch (work on any website)
+## What you can do
 
-| Tool | What it does |
-|------|-------------|
-| `extract_auth` | Grab auth tokens from any logged-in browser session (LinkedIn, Twitter, Slack, Discord, GitHub, Notion, or any domain) |
-| `authenticated_fetch` | Make HTTP requests carrying the browser's cookies/auth. Works on any site you're logged into. |
-| `discover_api` | Capture network traffic to find a site's API endpoints, then call them with `authenticated_fetch` |
+### Use your LinkedIn
 
-### LinkedIn
+Tell Claude: *"Extract my LinkedIn auth and get my recent posts with engagement metrics"*
 
 | Tool | What it does |
 |------|-------------|
-| `linkedin_profile` | Get a user's profile by vanity name |
+| `linkedin_profile` | Get a user's profile |
 | `linkedin_my_posts` | Your posts with likes, comments, reposts, impressions |
 | `linkedin_feed` | Your feed |
 | `linkedin_post` | Create a post |
 | `linkedin_search` | Search for people |
 | `linkedin_connections` | List your connections |
 
-**Setup:** Just tell Claude to `extract_auth("linkedin")` while you're logged into LinkedIn in Chrome. Done.
+### Use your Twitter/X
 
-### Twitter/X
+Tell Claude: *"Extract my Twitter auth and show me my recent tweets"*
+
+Bearer token and GraphQL query IDs are extracted automatically from Twitter's JS bundle at runtime — they rotate with every deployment, so they can't be hardcoded.
 
 | Tool | What it does |
 |------|-------------|
@@ -72,9 +63,9 @@ You'll see the Neo Bridge icon in your extensions bar. It connects automatically
 | `twitter_post` | Post a tweet (or reply) |
 | `twitter_search` | Search tweets |
 
-**Setup:** `extract_auth("twitter")` while logged into X.com. Bearer token and GraphQL query IDs are extracted automatically from Twitter's JS bundle at runtime (they rotate with every deployment, so they can't be hardcoded).
+### Use your WhatsApp
 
-### WhatsApp
+Tell Claude: *"Connect to WhatsApp"* → scan QR code → done forever.
 
 | Tool | What it does |
 |------|-------------|
@@ -83,66 +74,62 @@ You'll see the Neo Bridge icon in your extensions bar. It connects automatically
 | `whatsapp_read` | Read messages by chat ID, phone number, or contact name |
 | `whatsapp_send` | Send a message |
 
-**Setup:** Tell Claude to `whatsapp_connect`. Scan the QR code with your phone. After that it auto-reconnects.
+### Use ANY website you're logged into
 
-### Collections (structured data storage)
+These three tools work on any site — no pre-built integration needed:
 
 | Tool | What it does |
 |------|-------------|
-| `collection_create` | Create a table with custom schema + automatic full-text search |
+| `extract_auth` | Grab auth tokens from any logged-in browser session (Slack, Discord, GitHub, Notion, Salesforce, anything) |
+| `authenticated_fetch` | Make HTTP requests carrying the browser's cookies/auth |
+| `discover_api` | Capture network traffic to find a site's API endpoints |
+
+### Build new integrations on the fly
+
+Tell Claude: *"Build me a Notion integration"* and it will:
+
+1. `extract_auth("notion")` — grab your Notion token from Chrome
+2. `discover_api(start, navigate: "notion.so")` — capture Notion's API traffic
+3. `discover_api(list)` — see all the endpoints
+4. `create_tool(...)` — write JavaScript implementations and register them as real MCP tools
+
+Those tools are available immediately and persist across restarts.
+
+| Tool | What it does |
+|------|-------------|
+| `create_tool` | Create a new MCP tool with JavaScript. Available immediately + persists. |
+| `list_custom_tools` | List all tools the AI has created |
+| `get_tool_code` | View a custom tool's source code |
+| `delete_tool` | Delete a custom tool |
+
+### Store structured data
+
+The AI can create its own database tables to store anything it collects.
+
+| Tool | What it does |
+|------|-------------|
+| `collection_create` | Create a table with custom schema + full-text search |
 | `collection_insert` | Insert a row |
 | `collection_query` | Query with FTS, filters, ordering, pagination |
 | `collection_update` | Update a row by ID |
 | `collection_delete` | Delete a row by ID |
 | `collection_list` | List all collections |
 
-### Self-extending tools
-
-| Tool | What it does |
-|------|-------------|
-| `create_tool` | Create a new MCP tool with JavaScript implementation. Available immediately + persists across restarts. |
-| `list_custom_tools` | List all tools the AI has created |
-| `get_tool_code` | View a custom tool's implementation |
-| `delete_tool` | Delete a custom tool |
-
-## How self-extending works
-
-Tell Claude something like "build me a Notion integration" and it will:
-
-1. `extract_auth("notion")` — grab your Notion token from Chrome
-2. `discover_api(start, navigate: "notion.so")` — capture Notion's API traffic
-3. `discover_api(list)` — see all the endpoints
-4. `create_tool(...)` — write JavaScript implementations for each endpoint and register them as real MCP tools
-
-Next time you restart, those tools load automatically from SQLite.
-
-The AI writes the JavaScript, which runs with these helpers:
-- `params` — tool input
-- `helpers.credentials(service)` — get stored auth tokens
-- `helpers.browserFetch(url, opts)` — HTTP request from browser context
-- `helpers.store(service, key, val)` — store a credential
-- `helpers.query(collection, opts)` — query a collection
-- `helpers.insert(collection, data)` — insert into collection
-- `fetch` — standard fetch
-
-## Data storage
-
-Everything is stored in `~/.neo-mcp/`:
-- `neo-mcp.db` — SQLite database (credentials, collections, custom tools)
-- `whatsapp-auth/` — WhatsApp session (persists across restarts)
-
-## Architecture
+## How it works
 
 ```
-Claude ←→ MCP Server (stdio) ←→ WebSocket Bridge ←→ Chrome Extension
-                ↓
-           SQLite DB
-        (credentials, collections, custom tools)
+Claude Desktop ←→ Neo MCP Server (stdio) ←→ WebSocket Bridge ←→ Chrome Extension
+                         ↓
+                    SQLite DB (~/.neo-mcp/)
+              (credentials, collections, custom tools)
 ```
 
-The Chrome extension handles auth token extraction and authenticated fetch requests. The MCP server handles everything else (LinkedIn/Twitter API calls, WhatsApp, collections, tool creation).
+1. The **Chrome extension** extracts auth tokens from your logged-in browser sessions and can make authenticated HTTP requests on your behalf
+2. The **MCP server** uses those tokens to call service APIs directly (LinkedIn, Twitter) or proxies requests through the browser (authenticated_fetch)
+3. **Custom tools** the AI creates are stored in SQLite and loaded on every startup
+4. **WhatsApp** uses Baileys (multi-device protocol) — connects once via QR, persists session to disk
 
-For LinkedIn and Twitter, tokens are extracted once from the browser and then used for direct HTTP calls — the browser doesn't need to be open for subsequent API calls.
+After initial token extraction, LinkedIn and Twitter work without the browser open. WhatsApp runs its own persistent connection.
 
 ## License
 
