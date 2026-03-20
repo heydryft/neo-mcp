@@ -13,6 +13,20 @@
 
     window.__neo_bridge_available = true;
 
+    // ── Security: consume the per-page nonce planted by background.js ────
+    // The nonce is set as a non-enumerable property just before this script
+    // runs. We read it, delete it, and close over it so no page script can
+    // access it after this point.
+    var _nonce = window.__neo_pending_nonce || null;
+    try { delete window.__neo_pending_nonce; } catch (e) {
+        // In case delete fails (shouldn't with configurable:true), overwrite
+        try {
+            Object.defineProperty(window, '__neo_pending_nonce', {
+                value: undefined, configurable: true, enumerable: false, writable: false,
+            });
+        } catch (e2) { /* best effort */ }
+    }
+
     /**
      * Call a Neo Bridge command and get the result.
      * @param {string} method - Command name (e.g. "extract_auth", "browser_fetch")
@@ -21,6 +35,10 @@
      */
     window.__neo_call = function (method, params) {
         return new Promise(function (resolve, reject) {
+            if (!_nonce) {
+                reject(new Error("Neo bridge not initialized (missing nonce)"));
+                return;
+            }
             var id = "neo_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
             var timeout = setTimeout(function () {
                 window.removeEventListener("message", handler);
@@ -40,7 +58,7 @@
 
             window.addEventListener("message", handler);
             window.postMessage(
-                { type: "neo_command", id: id, method: method, params: params || {} },
+                { type: "neo_command", id: id, nonce: _nonce, method: method, params: params || {} },
                 "*"
             );
         });

@@ -1320,13 +1320,35 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
     // ── Inject page-bridge.js into MAIN world (bypasses page CSP) ────────
     // Manifest-declared MAIN world scripts get blocked by strict CSP on sites
     // like Google. chrome.scripting.executeScript is exempt from page CSP.
+    //
+    // Security: A per-page nonce prevents arbitrary page scripts from calling
+    // Neo commands via postMessage. The nonce is shared with page-bridge.js
+    // (MAIN world) and the content script (isolated world) through trusted channels.
     try {
         if (!details.url.startsWith("chrome://") && !details.url.startsWith("chrome-extension://") && !details.url.startsWith("about:")) {
+            const nonce = crypto.randomUUID();
+
+            // Step 1: Plant nonce in MAIN world as a non-enumerable property
+            await chrome.scripting.executeScript({
+                target: { tabId: details.tabId },
+                func: (n) => {
+                    Object.defineProperty(window, '__neo_pending_nonce', {
+                        value: n, configurable: true, enumerable: false, writable: false,
+                    });
+                },
+                args: [nonce],
+                world: "MAIN",
+            });
+
+            // Step 2: Inject page-bridge.js which reads and deletes the nonce
             await chrome.scripting.executeScript({
                 target: { tabId: details.tabId },
                 files: ["page-bridge.js"],
                 world: "MAIN",
             });
+
+            // Step 3: Send nonce to content script via trusted extension messaging
+            chrome.tabs.sendMessage(details.tabId, { action: "set_neo_nonce", nonce }).catch(() => {});
         }
     } catch (e) {
         // Silently ignore — some special pages can't be injected
