@@ -115,7 +115,11 @@ The AI can create its own database tables to store anything it collects.
 | `collection_delete` | Delete a row by ID |
 | `collection_list` | List all collections |
 
-## How it works
+## Transport modes
+
+Neo MCP supports two transports:
+
+### Stdio (default — Claude Desktop)
 
 ```
 Claude Desktop ←→ Neo MCP Server (stdio) ←→ WebSocket Bridge ←→ Chrome Extension
@@ -123,6 +127,49 @@ Claude Desktop ←→ Neo MCP Server (stdio) ←→ WebSocket Bridge ←→ Chro
                     SQLite DB (~/.neo-mcp/)
               (credentials, collections, custom tools)
 ```
+
+This is the default. Just add Neo to your Claude Desktop config as shown above.
+
+### HTTP (Cowork / remote clients)
+
+```
+Cowork VM / Client ──HTTP──→ Neo MCP Server (http://0.0.0.0:3100/mcp)
+                                    ↕ WebSocket
+                              Chrome Extension
+```
+
+Start the server in HTTP mode on your **host machine**:
+
+```bash
+# From the neo-mcp directory on your machine (not inside Cowork)
+NEO_TRANSPORT=http node dist/server.js
+```
+
+Or with a custom port:
+
+```bash
+NEO_TRANSPORT=http NEO_HTTP_PORT=4000 node dist/server.js
+```
+
+You can also use the `--http` flag:
+
+```bash
+node dist/server.js --http
+```
+
+The server exposes a Streamable HTTP MCP endpoint at `http://localhost:3100/mcp` (or your custom port).
+
+#### Cowork setup
+
+Cowork runs in a sandboxed Linux VM on your machine. To use Neo MCP with Cowork:
+
+1. Run `NEO_TRANSPORT=http node dist/server.js` in a terminal on your **host machine** (Windows/Mac)
+2. Make sure the Chrome extension is installed and connected
+3. Add Neo as a remote MCP server in your Claude/Cowork config pointing to `http://localhost:3100/mcp`
+
+> **Note:** The server must run on your host machine, not inside the Cowork VM, because it needs access to the Chrome extension (WebSocket bridge on localhost:7890) and the SQLite database with native bindings.
+
+## How it works
 
 1. The **Chrome extension** extracts auth tokens from your logged-in browser sessions and can make authenticated HTTP requests on your behalf
 2. The **MCP server** uses those tokens to call service APIs directly (LinkedIn, Twitter) or proxies requests through the browser (authenticated_fetch)

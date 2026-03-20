@@ -2,6 +2,7 @@
     "manifest_version": 3,
     "name": "Neo Bridge",
     "version": "1.0.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmUKkkULLwC2U9iPgOL3lkE3gUKvY/fmIcZ7IjB6qGSeKZhvdY4CkFOwufpReInafkmt3IuBCaDP00DEBdSlNIWOufUdPGIjVt+JZHCCUpzyBCctafcMm1xvog3nkeCqQJAX+eAvAuR/pvn1kOvt2o9EvhcG/IAQwhJnCiV3xfdWNW+Qo0BPNJpfH1PkrVgKgbCH8M4zWbn9JlKUzKPTkmvKe/QjLMM+GWXk1F91OTyNK1pJ6KnDP4AO72zH/YlGZruMxXdjmcL//2kF9GZUSFRe6BASniBIDjs2KDUBe9Mw9YdYagE2bL0xKC1LDdQWg9uqdC1jEW82djCEhstOoawIDAQAB",
     "description": "Browser bridge for Neo. Auto-extracts auth tokens, full browser control.",
     "permissions": [
         "cookies",
@@ -18,7 +19,8 @@
         "clipboardWrite",
         "history",
         "bookmarks",
-        "tabGroups"
+        "tabGroups",
+        "nativeMessaging"
     ],
     "host_permissions": ["<all_urls>"],
     "background": {
@@ -37,7 +39,7 @@
     },
     "web_accessible_resources": [
         {
-            "resources": ["inject.js"],
+            "resources": ["page-bridge.js"],
             "matches": ["<all_urls>"]
         }
     ]

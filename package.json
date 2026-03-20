@@ -10,12 +10,17 @@
   "files": [
     "dist",
     "extension",
+    "native-host.cjs",
+    "native-host.bat",
+    "scripts",
     "package.json"
   ],
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
+    "postinstall": "node scripts/postinstall.cjs",
     "start": "node dist/server.js",
+    "start:http": "node dist/server.js --http-only",
     "dev": "tsc && node dist/server.js"
   },
   "repository": {
@@ -25,8 +30,10 @@
   "homepage": "https://github.com/heydryft/neo-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/express": "^5.0.6",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^12.8.0",
+    "express": "^5.2.1",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
     "ws": "^8.19.0"

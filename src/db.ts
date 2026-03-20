@@ -90,6 +90,21 @@ export function listConnectedServices(): Array<{ service: string; keys: string[]
     }));
 }
 
+export function listProfiles(service: string): Array<{ profile: string; keys: string[]; updatedAt: string }> {
+    const rows = getDb()
+        .prepare(
+            `SELECT service, GROUP_CONCAT(key) as keys, MAX(updated_at) as updated_at
+             FROM credentials WHERE service = ? OR service LIKE ?
+             GROUP BY service ORDER BY service`
+        )
+        .all(service, `${service}:%`) as any[];
+    return rows.map((r) => ({
+        profile: r.service === service ? "default" : r.service.slice(service.length + 1),
+        keys: r.keys.split(","),
+        updatedAt: r.updated_at,
+    }));
+}
+
 // ── Collections ──────────────────────────────────────────────────────────────
 
 export interface CollectionColumn {

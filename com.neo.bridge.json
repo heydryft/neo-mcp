@@ -1,0 +1,9 @@
+{
+    "name": "com.neo.bridge",
+    "description": "Neo MCP Server - Auto-launches when the browser starts",
+    "path": "C:\\Users\\popco\\mcp\\neo-mcp\\native-host.bat",
+    "type": "stdio",
+    "allowed_origins": [
+        "chrome-extension://oaicihkplkjiachimlgebekmjohcaaek/"
+    ]
+}

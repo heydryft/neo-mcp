@@ -6,6 +6,7 @@
  */
 
 const NEO_WS_URL = "ws://127.0.0.1:7890";
+const NEO_MCP_URL = "http://127.0.0.1:3100/mcp";
 const RECONNECT_INTERVAL = 3000;
 const HEARTBEAT_INTERVAL = 30000;
 
@@ -15,6 +16,53 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let pendingContentRequests = new Map();
 let requestId = 0;
+let mcpSessionId = null; // Tracks MCP HTTP session for Cowork relay
+
+// ── Native Messaging: Auto-launch MCP server ────────────────────────────────
+// Chrome Native Messaging spawns the MCP server when the extension loads.
+// The server stays alive as long as Chrome is open. No manual "node server.js" needed.
+const NATIVE_HOST_NAME = "com.neo.bridge";
+let nativePort = null;
+let mcpServerReady = false;
+
+function connectNativeHost() {
+    if (nativePort) return;
+    try {
+        nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+
+        nativePort.onMessage.addListener((msg) => {
+            if (msg.type === "server_ready") {
+                mcpServerReady = true;
+                console.log("[neo] MCP server auto-started on port", msg.port);
+                updateBadge("ON", "#22c55e");
+            } else if (msg.type === "server_exited") {
+                mcpServerReady = false;
+                console.warn("[neo] MCP server exited with code", msg.code);
+            } else if (msg.type === "host_started") {
+                console.log("[neo] Native host connected — launching MCP server...");
+            }
+        });
+
+        nativePort.onDisconnect.addListener(() => {
+            const err = chrome.runtime.lastError?.message || "unknown";
+            nativePort = null;
+            mcpServerReady = false;
+            // Don't spam reconnect — native host not installed is a permanent condition
+            if (err.includes("not found") || err.includes("Specified native messaging host not found")) {
+                console.warn("[neo] Native messaging host not installed. Run `npm install` in the neo-mcp folder to set it up.");
+            } else {
+                console.warn("[neo] Native host disconnected:", err);
+                // Retry after a delay (server crash, etc.)
+                setTimeout(connectNativeHost, 5000);
+            }
+        });
+    } catch (e) {
+        console.warn("[neo] Native messaging unavailable:", e.message);
+    }
+}
+
+// Auto-connect on extension startup
+connectNativeHost();
 
 // ── Tab group management ─────────────────────────────────────────────────────
 // Neo gets its own tab group. Never touches user tabs.
@@ -147,8 +195,16 @@ async function handleCommand(method, params) {
     switch (method) {
         // ── Navigation (all tabs created by Neo go into the Neo tab group) ──
         case "navigate":
+            // If called via Cowork relay, navigate the current tab instead of creating a new Neo tab
+            if (params._relay_tab_id) return neoNavigateTab(params.url, params._relay_tab_id);
             return neoNavigate(params.url);
         case "get_url":
+            if (params._relay_tab_id) {
+                try {
+                    const t = await chrome.tabs.get(params._relay_tab_id);
+                    return { tab_id: t.id, url: t.url, title: t.title };
+                } catch {}
+            }
             return getNeoActiveTab();
         case "get_tabs":
             return getNeoTabs();
@@ -163,13 +219,13 @@ async function handleCommand(method, params) {
         case "navigate_tab":
             return neoNavigateTab(params.url, params.tab_id);
         case "go_back":
-            return execOnNeoTab("history.back()");
+            return execOnNeoTab("history.back()", params._relay_tab_id);
         case "go_forward":
-            return execOnNeoTab("history.forward()");
+            return execOnNeoTab("history.forward()", params._relay_tab_id);
         case "get_profile":
             return getProfile();
         case "reload":
-            return reloadTab(params.tab_id);
+            return reloadTab(params.tab_id || params._relay_tab_id);
 
         // ── DOM Interaction ──────────────────────────────────────────
         case "click":
@@ -219,7 +275,7 @@ async function handleCommand(method, params) {
 
         // ── Screenshots ──────────────────────────────────────────────
         case "screenshot":
-            return screenshot(params.quality);
+            return screenshot(params.quality, params._relay_tab_id);
         case "screenshot_full":
             return contentCommand("screenshot_full", params);
 
@@ -267,6 +323,41 @@ async function handleCommand(method, params) {
         case "browser_fetch":
             return browserFetch(params);
 
+        // ── MCP Server relay (Cowork → localhost MCP server) ─────────
+        case "mcp_request":
+            return mcpRequest(params);
+        case "mcp_tools_list":
+            return mcpToolsList();
+        case "mcp_tool_call":
+            return mcpToolCall(params.name, params.arguments || {});
+
+        // ── Diagnostics ──────────────────────────────────────────────
+        case "neo_status":
+            return {
+                nativePort: !!nativePort,
+                mcpServerReady,
+                mcpSessionId: mcpSessionId || null,
+                wsConnected: connected,
+                extensionId: chrome.runtime.id,
+                mcpUrl: NEO_MCP_URL,
+            };
+
+        // Raw fetch debug — test MCP server and return ALL headers
+        case "mcp_debug_fetch": {
+            try {
+                const hdrs = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" };
+                if (mcpSessionId) hdrs["mcp-session-id"] = mcpSessionId;
+                const r = await fetch(NEO_MCP_URL, { method: "POST", headers: hdrs,
+                    body: JSON.stringify(params.message || { jsonrpc: "2.0", id: "dbg", method: "initialize",
+                        params: { protocolVersion: "2024-11-05", capabilities: {},
+                            clientInfo: { name: "dbg", version: "1.0" } } }) });
+                const respHeaders = {};
+                r.headers.forEach((v, k) => { respHeaders[k] = v; });
+                const body = await r.text();
+                return { status: r.status, headers: respHeaders, body: body.slice(0, 500), sentSessionId: mcpSessionId };
+            } catch (e) { return { error: e.message }; }
+        }
+
         default:
             throw new Error(`Unknown method: ${method}`);
     }
@@ -275,7 +366,12 @@ async function handleCommand(method, params) {
 // ── Tab Group Management ─────────────────────────────────────────────────────
 // Neo works in its own tab group. Never touches user tabs.
 
+// Edge doesn't support chrome.tabGroups — detect once at startup
+const hasTabGroups = typeof chrome.tabGroups !== "undefined";
+
 async function ensureNeoGroup() {
+    if (!hasTabGroups) return null;
+
     // Check if our group still exists
     if (neoGroupId !== null) {
         try {
@@ -305,6 +401,7 @@ async function ensureNeoGroup() {
 }
 
 async function addTabToNeoGroup(tabId) {
+    if (!hasTabGroups) { neoTabIds.add(tabId); return; }
     const groupId = await ensureNeoGroup();
     try {
         await chrome.tabs.group({ tabIds: [tabId], groupId });
@@ -456,14 +553,16 @@ async function contentCommand(action, params) {
     return results;
 }
 
-async function execOnNeoTab(code) {
-    const neoTabs = Array.from(neoTabIds);
-    let tabId = null;
-    for (let i = neoTabs.length - 1; i >= 0; i--) {
-        try {
-            const tab = await chrome.tabs.get(neoTabs[i]);
-            if (tab) { tabId = tab.id; break; }
-        } catch { neoTabIds.delete(neoTabs[i]); }
+async function execOnNeoTab(code, relayTabId) {
+    let tabId = relayTabId || null;
+    if (!tabId) {
+        const neoTabs = Array.from(neoTabIds);
+        for (let i = neoTabs.length - 1; i >= 0; i--) {
+            try {
+                const tab = await chrome.tabs.get(neoTabs[i]);
+                if (tab) { tabId = tab.id; break; }
+            } catch { neoTabIds.delete(neoTabs[i]); }
+        }
     }
     if (!tabId) throw new Error("No Neo tab available.");
 
@@ -557,10 +656,18 @@ async function execJsInPage(code, tabId) {
 
 // ── Screenshots ──────────────────────────────────────────────────────────────
 
-async function screenshot(quality) {
+async function screenshot(quality, tabId) {
     // Low quality by default to keep context small
     // quality 20 JPEG at tab resolution ~= 15-30KB ~= 3-6K tokens
-    const dataUrl = await chrome.tabs.captureVisibleTab(null, {
+    // If tabId provided (e.g. from Cowork relay), activate that tab's window first
+    let windowId = null;
+    if (tabId) {
+        try {
+            const tab = await chrome.tabs.get(tabId);
+            windowId = tab.windowId;
+        } catch {}
+    }
+    const dataUrl = await chrome.tabs.captureVisibleTab(windowId, {
         format: "jpeg",
         quality: quality || 20,
     });
@@ -743,7 +850,15 @@ async function download(url, filename) {
 // Intercepts HTTP requests. Stores summaries in a lightweight list,
 // full headers/bodies stored separately so the agent can drill down lazily.
 
+// Edge MV3 has limited/broken webRequest — detect availability
+const hasWebRequest = typeof chrome.webRequest !== "undefined" &&
+    typeof chrome.webRequest.onBeforeSendHeaders !== "undefined";
+
 function networkStartCapture(filters, maxEntries) {
+    if (!hasWebRequest) {
+        return { capturing: false, error: "Network capture not available in this browser" };
+    }
+
     networkCapture.active = true;
     networkCapture.filters = filters || [];
     networkCapture.requests = [];
@@ -774,7 +889,7 @@ function networkStartCapture(filters, maxEntries) {
 
 function networkStopCapture() {
     networkCapture.active = false;
-    if (networkStartCapture._listening) {
+    if (hasWebRequest && networkStartCapture._listening) {
         chrome.webRequest.onBeforeSendHeaders.removeListener(networkOnRequest);
         chrome.webRequest.onCompleted.removeListener(networkOnResponse);
         chrome.webRequest.onBeforeRequest.removeListener(networkOnRequestBody);
@@ -1052,6 +1167,140 @@ async function browserFetch(params) {
     return result;
 }
 
+// ── MCP Server Relay (Cowork → localhost MCP HTTP server) ────────────────────
+// Allows Cowork (via page-bridge → content.js → background.js) to call the
+// same MCP tools that Claude Desktop gets via stdio. The extension can reach
+// localhost while Cowork's sandboxed VM cannot.
+
+async function mcpRequest(params) {
+    const headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    };
+    if (mcpSessionId) {
+        headers["mcp-session-id"] = mcpSessionId;
+    }
+
+    const response = await fetch(NEO_MCP_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(params.message),
+    });
+
+    // Capture session ID from response
+    const sid = response.headers.get("mcp-session-id");
+    if (sid) mcpSessionId = sid;
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        // If session expired/invalid (server restarted), clear it so next call re-initializes
+        if (response.status === 400 && errText.includes("session")) {
+            mcpSessionId = null;
+        }
+        throw new Error(`MCP server error ${response.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const text = await response.text();
+
+    // MCP Streamable HTTP returns SSE format: "event: message\ndata: {...}\n\n"
+    // Parse the last JSON-RPC message from the SSE stream
+    if (contentType.includes("text/event-stream") || text.startsWith("event:")) {
+        const lines = text.split("\n");
+        let lastData = null;
+        for (const line of lines) {
+            if (line.startsWith("data: ")) {
+                try { lastData = JSON.parse(line.slice(6)); } catch {}
+            }
+        }
+        return lastData || { error: "No valid SSE data in response" };
+    }
+
+    // Plain JSON response
+    try { return JSON.parse(text); } catch { return { raw: text }; }
+}
+
+// High-level helpers for common MCP operations
+
+async function mcpEnsureSession(forceNew) {
+    if (mcpSessionId && !forceNew) return;
+    mcpSessionId = null; // Clear stale session
+    // Initialize MCP session
+    await mcpRequest({
+        message: {
+            jsonrpc: "2.0",
+            method: "initialize",
+            params: {
+                protocolVersion: "2025-03-26",
+                capabilities: {},
+                clientInfo: { name: "neo-bridge-relay", version: "1.0.0" },
+            },
+            id: "init_" + Date.now(),
+        },
+    });
+    // Send initialized notification
+    await mcpRequest({
+        message: {
+            jsonrpc: "2.0",
+            method: "notifications/initialized",
+        },
+    });
+}
+
+// Wrapper that retries once on session errors (handles server restarts)
+async function mcpWithRetry(fn) {
+    try {
+        await mcpEnsureSession();
+        return await fn();
+    } catch (e) {
+        if (e.message && e.message.includes("session")) {
+            // Session was invalidated — re-init and retry once
+            await mcpEnsureSession(true);
+            return await fn();
+        }
+        throw e;
+    }
+}
+
+async function mcpToolsList() {
+    return mcpWithRetry(async () => {
+        const result = await mcpRequest({
+            message: {
+                jsonrpc: "2.0",
+                method: "tools/list",
+                params: {},
+                id: "list_" + Date.now(),
+            },
+        });
+        const tools = result?.result?.tools || [];
+        return tools.map((t) => ({ name: t.name, description: t.description }));
+    });
+}
+
+async function mcpToolCall(name, args) {
+    return mcpWithRetry(async () => {
+        const result = await mcpRequest({
+            message: {
+                jsonrpc: "2.0",
+                method: "tools/call",
+                params: { name, arguments: args },
+                id: "call_" + Date.now(),
+            },
+        });
+        if (result?.result?.content) {
+            const texts = result.result.content
+                .filter((c) => c.type === "text")
+                .map((c) => c.text);
+            try {
+                return texts.length === 1 ? JSON.parse(texts[0]) : texts;
+            } catch {
+                return texts.length === 1 ? texts[0] : texts;
+            }
+        }
+        return result;
+    });
+}
+
 // ── Auto-detection: watch for logins ─────────────────────────────────────────
 
 const AUTH_DOMAINS = {
@@ -1067,6 +1316,21 @@ const AUTH_DOMAINS = {
 
 chrome.webNavigation.onCompleted.addListener(async (details) => {
     if (details.frameId !== 0) return; // only main frame
+
+    // ── Inject page-bridge.js into MAIN world (bypasses page CSP) ────────
+    // Manifest-declared MAIN world scripts get blocked by strict CSP on sites
+    // like Google. chrome.scripting.executeScript is exempt from page CSP.
+    try {
+        if (!details.url.startsWith("chrome://") && !details.url.startsWith("chrome-extension://") && !details.url.startsWith("about:")) {
+            await chrome.scripting.executeScript({
+                target: { tabId: details.tabId },
+                files: ["page-bridge.js"],
+                world: "MAIN",
+            });
+        }
+    } catch (e) {
+        // Silently ignore — some special pages can't be injected
+    }
 
     try {
         const url = new URL(details.url);
@@ -1095,6 +1359,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
     } else if (msg.type === "extract_auth") {
         extractAuth(msg.service).then(sendResponse);
+        return true; // async
+    } else if (msg.action === "relay_command") {
+        // Cowork relay: content script forwards commands from window.postMessage
+        // Inject the sender's tab ID so tab-targeting commands (read_page, click,
+        // screenshot, etc.) operate on the tab the user is actually viewing,
+        // instead of requiring a Neo-managed tab.
+        const relayParams = Object.assign({}, msg.params || {});
+        if (sender && sender.tab && sender.tab.id && !relayParams.tab_id) {
+            relayParams.tab_id = sender.tab.id;
+            relayParams._relay_tab_id = sender.tab.id; // marker for screenshot/execOnNeoTab
+        }
+        handleCommand(msg.method, relayParams)
+            .then((result) => sendResponse(result))
+            .catch((err) => sendResponse({ error: err.message || String(err) }));
         return true; // async
     }
 });

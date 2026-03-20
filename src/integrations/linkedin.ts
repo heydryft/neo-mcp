@@ -78,36 +78,68 @@ async function linkedinApi<T = any>(
     return response.json() as Promise<T>;
 }
 
+/** Get the authenticated user's mini-profile (objectUrn, name) */
+async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn: string }> {
+    const data = await linkedinApi(auth, `/me`);
+    const profile = data.miniProfile || data;
+    return {
+        objectUrn: profile.objectUrn || "",
+        entityUrn: profile.entityUrn || profile.objectUrn || "",
+    };
+}
+
 /** Get a user's profile by vanity name (the URL slug) */
 export async function getProfile(auth: LinkedInAuth, vanityName: string): Promise<any> {
-    // Use the simpler profile endpoint without decoration ID
-    const data = await linkedinApi(auth, `/identity/profiles/${encodeURIComponent(vanityName)}/profileView`);
+    // The old /identity/profiles/{name}/profileView returns 410 (Gone).
+    // Use the dash endpoint with memberIdentity query.
+    const data = await linkedinApi(auth, `/identity/dash/profiles`, {
+        params: {
+            q: "memberIdentity",
+            memberIdentity: vanityName,
+            decorationId: "com.linkedin.voyager.dash.deco.identity.profile.FullProfile-91",
+        },
+    });
 
-    const profile = data.profile || data;
+    // Normalized response: find the Profile entity in the included array
+    const included: any[] = data.included || [];
+    const profile = included.find((e: any) =>
+        e.$type?.includes("Profile") && (e.firstName || e.publicIdentifier)
+    ) || {};
+
     return {
         firstName: profile.firstName,
         lastName: profile.lastName,
-        headline: profile.headline,
-        summary: profile.summary,
-        location: profile.geoLocationName || profile.locationName,
-        industry: profile.industryName,
-        publicId: profile.miniProfile?.publicIdentifier || vanityName,
-        connections: profile.connectionCount,
-        followers: profile.followerCount,
+        headline: profile.headline?.text || profile.headline,
+        summary: profile.summary?.text || profile.summary,
+        location: profile.geoLocation?.geo?.defaultLocalizedName
+            || profile.geoLocationName
+            || profile.locationName,
+        industry: profile.industry?.name || profile.industryName,
+        publicId: profile.publicIdentifier || vanityName,
+        connections: profile.connectionsCount || profile.connectionCount,
+        followers: profile.followersCount || profile.followerCount,
     };
 }
 
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    // Use feed/updatesV2 filtered to own posts
-    const data = await linkedinApi(auth, `/feed/updatesV2`, {
-        params: {
-            count: String(count),
-            q: "memberShareFeed",
-            start: "0",
-        },
-    });
+    // Get our member URN to filter to own posts only
+    let memberUrn = "";
+    try {
+        const me = await getMe(auth);
+        memberUrn = me.objectUrn;
+    } catch {}
 
+    const params: Record<string, string> = {
+        count: String(count),
+        q: "memberShareFeed",
+        moduleKey: "memberShareFeed",
+        start: "0",
+        paginationToken: "",
+    };
+    if (memberUrn) params.memberUrn = memberUrn;
+
+    const data = await linkedinApi(auth, `/feed/updatesV2`, { params });
     return extractPosts(data, count);
 }
 
@@ -118,6 +150,7 @@ export async function getFeed(auth: LinkedInAuth, count = 20): Promise<any[]> {
             count: String(count),
             q: "relevance",
             start: "0",
+            paginationToken: "",
         },
     });
 
@@ -125,21 +158,45 @@ export async function getFeed(auth: LinkedInAuth, count = 20): Promise<any[]> {
 }
 
 function extractPosts(data: any, max: number): any[] {
-    // LinkedIn's normalized response puts data in `included` array
-    const included = data.included || data.elements || [];
+    // LinkedIn's normalized response puts ALL entities in `included`.
+    // engagement data (socialDetail) lives as a separate entity referenced
+    // by URN via the "*socialDetail" pointer field on the update entity.
+    const included: any[] = data.included || data.elements || [];
+
+    // Build a URN → entity map for cross-referencing
+    const byUrn = new Map<string, any>();
+    for (const item of included) {
+        const urn = item.entityUrn || item.urn || item.updateUrn;
+        if (urn) byUrn.set(urn, item);
+    }
+
     const posts: any[] = [];
 
     for (const item of included) {
         if (posts.length >= max) break;
 
-        // Look for items that have commentary (actual posts)
+        // Only process update items (skip authors, social details, etc.)
+        const isUpdate = item["$type"]?.includes("UpdateV2")
+            || item["$type"]?.includes("update.Update")
+            || !!item.updateUrn;
+        if (!isUpdate) continue;
+
+        // Extract post text from commentary (several nesting shapes exist)
         const commentary = item.commentary?.text?.text
-            || item.value?.com?.linkedin?.voyager?.feed?.render?.UpdateV2?.commentary?.text?.text
+            || item.commentary?.text
+            || item.value?.["com.linkedin.voyager.feed.render.UpdateV2"]?.commentary?.text?.text
             || "";
 
         if (!commentary) continue;
 
-        const socialCounts = item.socialDetail?.totalSocialActivityCounts || {};
+        // Look up the socialDetail entity by URN reference.
+        // LinkedIn stores the reference as "*socialDetail" (a URN pointer).
+        const socialDetailUrn = item["*socialDetail"];
+        const socialDetail = socialDetailUrn
+            ? byUrn.get(socialDetailUrn)
+            : item.socialDetail;
+
+        const socialCounts = socialDetail?.totalSocialActivityCounts || {};
 
         posts.push({
             text: commentary.slice(0, 1000),
@@ -157,23 +214,33 @@ function extractPosts(data: any, max: number): any[] {
 
 /** Create a text post */
 export async function createPost(auth: LinkedInAuth, text: string): Promise<any> {
-    const data = await linkedinApi(auth, `/contentcreation/shares`, {
-        method: "POST",
-        body: {
-            comment: {
-                text,
-                attributes: [],
-            },
-            visibility: {
-                code: "PUBLIC",
-            },
-            distribution: {
-                feedDistribution: "MAIN_FEED",
-                thirdPartyDistributionChannels: [],
-            },
-            origin: "MEMBER_SHARE",
+    // Get author URN (needed for UGC post format)
+    let authorUrn = "";
+    try {
+        const me = await getMe(auth);
+        // objectUrn is like "urn:li:member:12345" — need "urn:li:person:12345" for authoring
+        authorUrn = me.objectUrn.replace("urn:li:member:", "urn:li:person:");
+    } catch {}
+
+    // Use normShares — the replacement for the deprecated /contentcreation/shares endpoint
+    const body: any = {
+        visibleToGuest: true,
+        commentary: {
+            text,
+            attributes: [],
         },
+        distribution: {
+            feedDistribution: "MAIN_FEED",
+            thirdPartyDistributionChannels: [],
+        },
+    };
+    if (authorUrn) body.author = authorUrn;
+
+    const data = await linkedinApi(auth, `/contentcreation/normShares`, {
+        method: "POST",
+        body,
     });
+
     return { posted: true, urn: data.urn || data.value?.urn };
 }
 

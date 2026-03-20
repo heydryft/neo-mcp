@@ -10,7 +10,45 @@
  * - Contenteditable / WYSIWYG editors
  * - File inputs, date pickers, sliders, color pickers
  * - Drag and drop
+ * - Cowork relay: window.postMessage → background.js command bridge
  */
+
+// ── Cowork Relay ─────────────────────────────────────────────────────────────
+// Allows Claude in Chrome (Cowork) to send Neo MCP commands via postMessage.
+//
+// Architecture: Content scripts run in an "isolated world" — they share the DOM
+// but NOT the JS context with the page. So we need two parts:
+//   1. A <script> tag injected into the PAGE context with window.__neo_call()
+//   2. A postMessage listener in the CONTENT SCRIPT context that relays to background.js
+//
+// Flow: page JS → postMessage("neo_command") → content script → chrome.runtime.sendMessage
+//       → background.js handleCommand() → response back through the same chain
+
+// Part 1: Content script side — listen for postMessage from page, relay to background
+(function() {
+    window.addEventListener("message", (event) => {
+        if (event.source !== window) return;
+        if (!event.data || event.data.type !== "neo_command") return;
+
+        const { id, method, params } = event.data;
+        if (!method) return;
+
+        chrome.runtime.sendMessage(
+            { action: "relay_command", method, params: params || {} },
+            (response) => {
+                window.postMessage({
+                    type: "neo_response",
+                    id: id || null,
+                    result: response,
+                }, "*");
+            }
+        );
+    });
+})();
+
+// Part 2: page-bridge.js is loaded in the MAIN world via manifest.json "world": "MAIN"
+// It exposes window.__neo_call() and window.__neo_bridge_available to the page context.
+// This avoids CSP issues with inline script injection on sites like Google.
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg.action) return;
