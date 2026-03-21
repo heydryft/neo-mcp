@@ -28,56 +28,63 @@ import * as gdrive from "./integrations/gdrive.js";
 import * as db from "./db.js";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge.js";
 
-const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user's real accounts — LinkedIn, Twitter/X, Slack, WhatsApp, and ANY website they're logged into. No API keys needed.
+const NEO_INSTRUCTIONS = `Neo gives you direct API access to the user's real accounts — 10x-100x faster than browser automation. No API keys needed. You can operate ANY service the user is logged into.
 
-## Built-in services
-- LinkedIn: extract_auth("linkedin") once, then use linkedin_* tools
-- Twitter/X: extract_auth("twitter") once, then use twitter_* tools
-- GitHub: Auto-detects gh CLI token, or use store_credential("github", "token", "ghp_...") with a PAT. Then use github_* tools (repos, issues, PRs, actions, gists, search)
-- Notion: extract_auth("notion") once, then use notion_* tools (pages, databases, search, create/edit)
-- Discord: extract_auth("discord") once, then use discord_* tools (servers, channels, messages, DMs, reactions)
-- Slack: extract_auth("slack") once, then use slack_* tools
-- Google Calendar: gcal_connect (OAuth sign-in, then use gcal_* tools for events, scheduling, free/busy)
-- Google Drive: gdrive_connect (OAuth sign-in, then use gdrive_* tools for files, folders, search, read/write)
-- Gmail: gmail_connect (OAuth sign-in, supports multiple accounts via profile param)
-- WhatsApp: whatsapp_connect (QR code first time, auto-reconnects after)
+## How to handle ANY request
 
-## When a built-in tool doesn't exist for what the user wants
-This is the critical workflow. Follow these steps EVERY TIME:
+STEP 1: Does a built-in tool exist?
+Check the tool list. Tools are prefixed by service: linkedin_*, twitter_*, github_*, notion_*, discord_*, slack_*, gcal_*, gdrive_*, gmail_*, whatsapp_*. Also: meeting_prep, smart_inbox, contact_enrich, content_calendar, pr_digest, repurpose_content, discover_api, web_scrape, diff_monitor.
+→ If yes: call it directly. Chain multiple tools for complex requests.
+→ If no: go to Step 2.
 
-1. extract_auth("servicename") — grab auth tokens from the browser
-2. network_capture(action: "start", navigate: "https://the-site.com/relevant-page") — start capturing network traffic and navigate to the page
-3. network_requests() — list all API calls the page made (you'll see the internal API endpoints)
-4. network_request_detail(id: "...") — pick the relevant request and inspect its FULL headers (you need these for CSRF tokens, auth headers, content-type, etc.)
-5. authenticated_fetch(url, method, headers: {...}) — replay the request with the exact headers you found in step 4
-6. create_tool(...) — once you have a working request, wrap it into a permanent tool so you never repeat this discovery
+STEP 2: Can you compose it from existing tools?
+Most requests are just chains: "summarize my LinkedIn messages" = linkedin_conversations → linkedin_messages → your reasoning.
+"Prep for my 2pm meeting" = gcal_events → meeting_prep or manually linkedin_profile each attendee.
+"What needs my attention?" = smart_inbox (or chain github_notifications + linkedin_conversations + gcal_events yourself).
+→ Think about what data you need, which tools provide it, and chain them. No new tool needed.
 
-## IMPORTANT: authenticated_fetch vs fetch in create_tool
-- authenticated_fetch goes through the browser extension — carries the page's cookies automatically but you CAN'T control CSRF headers (many sites will reject with 403)
-- In create_tool code, use fetch() directly with helpers.credentials() to set cookies and CSRF headers explicitly. This is more reliable.
+STEP 3: The service isn't built-in — reverse-engineer it.
+Use discover_api(url) to auto-extract auth + capture API endpoints from ANY website. Or manually:
+1. extract_auth("domain.com") — grab tokens/cookies from the browser
+2. network_capture(start) + navigate — capture the site's API calls
+3. network_request_detail(id) — inspect headers (CSRF tokens, auth headers, content-type)
+4. authenticated_fetch(url, headers) — replay the request
+5. create_tool(...) — save it permanently so you never repeat discovery
 
-Example — the RIGHT way to call LinkedIn's API in a custom tool:
+## Speed principles
+- ALWAYS prefer neo tools over browser automation. API calls are instant; clicking through pages is slow.
+- Chain tools in parallel when possible (e.g., fetch GitHub + LinkedIn + Calendar simultaneously).
+- For cross-platform tasks, fetch all data first, then reason about it — don't alternate between fetching and thinking.
+- web_scrape returns structured data from any URL — use it instead of authenticated_fetch when you need parsed content, not raw HTML.
+
+## Service connection cheat sheet
+| Service | Setup | Auth method |
+|---------|-------|-------------|
+| LinkedIn | extract_auth("linkedin") | Cookie-based (li_at) |
+| Twitter/X | extract_auth("twitter") | Cookie-based (auth_token) |
+| GitHub | Auto-detects gh CLI, or store_credential("github","token","ghp_...") | PAT token |
+| Notion | extract_auth("notion") | Cookie-based (token_v2) |
+| Discord | extract_auth("discord") | Token-based |
+| Slack | extract_auth("slack") | Cookie-based (xoxc) |
+| Google Calendar | gcal_connect | OAuth |
+| Google Drive | gdrive_connect | OAuth |
+| Gmail | gmail_connect | OAuth |
+| WhatsApp | whatsapp_connect | QR code |
+| Any other site | extract_auth("domain") + discover_api | Cookie/token |
+
+## create_tool — make permanent tools on the fly
+Creates a real MCP tool, available immediately (no restart). Use after discover_api to save a working pattern.
+Code runs as async JS with: params, fetch, helpers.credentials(service), helpers.browserFetch(url, opts), helpers.store(service, key, val), helpers.query(collection, opts), helpers.insert(collection, data).
+
+IMPORTANT: In create_tool code, use fetch() with explicit headers from helpers.credentials() — NOT authenticated_fetch (which can't set CSRF headers). Example:
   const creds = helpers.credentials("linkedin");
-  const res = await fetch(url, {
-    headers: {
-      "Cookie": "li_at=" + creds.li_at + "; JSESSIONID=\\"" + creds.jsessionid + "\\"",
-      "csrf-token": creds.jsessionid,
-      "x-restli-protocol-version": "2.0.0",
-    }
-  });
+  const res = await fetch(url, { headers: { "Cookie": "li_at=" + creds.li_at, "csrf-token": creds.jsessionid } });
 
-Use network_request_detail to discover what headers a site needs, then replicate them with fetch() + helpers.credentials() in create_tool.
+## Collections — persistent structured storage
+Create SQLite tables on the fly with collection_create. Use for: tracking state across sessions, storing scraped data, content calendars, monitoring snapshots. Full-text search built in.
 
-## create_tool
-Creates a REAL MCP tool available immediately (no restart needed). The AI writes JavaScript that runs with:
-- params — tool input parameters
-- helpers.credentials(service) — stored auth tokens (from extract_auth)
-- helpers.browserFetch(url, opts) — request from browser context (auto cookies, no custom headers)
-- helpers.store(service, key, val) — store a credential
-- helpers.query(collection, opts) / helpers.insert(collection, data) — SQLite collections
-- fetch — standard fetch (YOU control all headers, cookies, body — use this for API calls)
-
-Always create_tool after you get a working pattern. This saves the user from waiting for rediscovery next time.`;
+## diff_monitor — watch anything for changes
+Monitor any URL or API endpoint for changes. Stores snapshots in collections, compares on each run, reports diffs. Use for price tracking, job posting changes, competitor monitoring, or any "tell me when X changes" request.`;
 
 const server = new McpServer(
     { name: "neo", version: "1.0.0" },
