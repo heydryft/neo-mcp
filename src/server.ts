@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import * as linkedin from "./integrations/linkedin.js";
 import * as twitter from "./integrations/twitter.js";
 import * as slack from "./integrations/slack.js";
+import * as gmail from "./integrations/gmail.js";
 import * as db from "./db.js";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge.js";
 
@@ -28,6 +29,7 @@ const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user
 - LinkedIn: extract_auth("linkedin") once, then use linkedin_* tools
 - Twitter/X: extract_auth("twitter") once, then use twitter_* tools
 - Slack: extract_auth("slack") once, then use slack_* tools
+- Gmail: gmail_connect (OAuth sign-in, supports multiple accounts via profile param)
 - WhatsApp: whatsapp_connect (QR code first time, auto-reconnects after)
 
 ## When a built-in tool doesn't exist for what the user wants
@@ -114,6 +116,13 @@ function getTwitterAuth(profile?: string): twitter.TwitterAuth {
     const creds = getAuth(profileKey("twitter", profile));
     if (!creds.auth_token) throw new Error(`Missing auth_token. Run extract_auth for twitter${profile ? ` (profile: ${profile})` : ""}.`);
     return { auth_token: creds.auth_token, csrf_token: creds.csrf_token || "" };
+}
+
+async function getGmailAuth(profile?: string): Promise<gmail.GmailAuth> {
+    const creds = getAuth(profileKey("gmail", profile));
+    if (!creds.refresh_token) throw new Error(`Gmail not connected${profile ? ` for profile "${profile}"` : ""}. Use gmail_connect to authenticate.`);
+    const access_token = await gmail.refreshAccessToken(creds.refresh_token, profile || "default");
+    return { access_token };
 }
 
 function getSlackAuth(profile?: string): slack.SlackAuth {
@@ -529,6 +538,72 @@ server.tool("slack_unpin", "Unpin a message.", { channel: z.string(), timestamp:
 
 server.tool("slack_pins", "List pinned messages in a channel.", { channel: z.string(), ...profileParam },
     async ({ channel, profile }) => ({ content: [{ type: "text", text: json(await slack.listPins(getSlackAuth(profile), channel)) }] }));
+
+// ── Gmail ─────────────────────────────────────────────────────────────────────
+
+server.tool("gmail_connect", "Connect a Gmail account via OAuth. Opens Google sign-in in the browser. Use profile to connect multiple accounts.",
+    { profile: z.string().optional().describe("Account name (e.g. 'personal', 'work'). Omit for default.") },
+    async ({ profile }) => {
+        const authUrl = `http://127.0.0.1:${httpPort}/gmail/auth${profile ? `?profile=${profile}` : ""}`;
+        try { await browserCommand("navigate", { url: authUrl }); } catch {}
+        // Wait for callback to store tokens
+        const storageKey = profileKey("gmail", profile);
+        const deadline = Date.now() + 120000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2000));
+            const creds = memCredentials.get(storageKey);
+            if (creds?.refresh_token) {
+                const label = profile ? ` as "${profile}"` : "";
+                return { content: [{ type: "text", text: `Gmail connected${label}${creds.email ? ` (${creds.email})` : ""}.` }] };
+            }
+        }
+        return { content: [{ type: "text", text: `Timed out waiting for Gmail auth. Visit ${authUrl} manually.` }] };
+    });
+
+server.tool("gmail_profile", "Get Gmail profile info (email, message count).", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gmail.getProfile(await getGmailAuth(profile))) }] }));
+
+server.tool("gmail_inbox", "Read your Gmail inbox.", { query: z.string().optional().describe("Gmail search query to filter"), max_results: z.number().optional(), page_token: z.string().optional(), ...profileParam },
+    async ({ query, max_results, page_token, profile }) => ({ content: [{ type: "text", text: json(await gmail.getInbox(await getGmailAuth(profile), { query, maxResults: max_results || 20, pageToken: page_token })) }] }));
+
+server.tool("gmail_search", "Search Gmail messages.", { query: z.string().describe("Gmail search query (same syntax as Gmail search bar)"), max_results: z.number().optional(), page_token: z.string().optional(), ...profileParam },
+    async ({ query, max_results, page_token, profile }) => ({ content: [{ type: "text", text: json(await gmail.searchMail(await getGmailAuth(profile), query, max_results || 20, page_token)) }] }));
+
+server.tool("gmail_read", "Read a specific email message.", { message_id: z.string(), ...profileParam },
+    async ({ message_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.getMessage(await getGmailAuth(profile), message_id)) }] }));
+
+server.tool("gmail_thread", "Read an entire email thread.", { thread_id: z.string(), ...profileParam },
+    async ({ thread_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.getThread(await getGmailAuth(profile), thread_id)) }] }));
+
+server.tool("gmail_send", "Send an email.", { to: z.string(), subject: z.string(), body: z.string(), cc: z.string().optional(), bcc: z.string().optional(), thread_id: z.string().optional().describe("Thread ID to reply in"), ...profileParam },
+    async ({ to, subject, body, cc, bcc, thread_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.sendEmail(await getGmailAuth(profile), to, subject, body, { cc, bcc, threadId: thread_id })) }] }));
+
+server.tool("gmail_reply", "Reply to the last message in a thread.", { thread_id: z.string(), body: z.string(), ...profileParam },
+    async ({ thread_id, body, profile }) => ({ content: [{ type: "text", text: json(await gmail.replyToThread(await getGmailAuth(profile), thread_id, body)) }] }));
+
+server.tool("gmail_draft", "Create a draft email.", { to: z.string(), subject: z.string(), body: z.string(), cc: z.string().optional(), bcc: z.string().optional(), thread_id: z.string().optional(), ...profileParam },
+    async ({ to, subject, body, cc, bcc, thread_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.createDraft(await getGmailAuth(profile), to, subject, body, { cc, bcc, threadId: thread_id })) }] }));
+
+server.tool("gmail_mark_read", "Mark an email as read.", { message_id: z.string(), ...profileParam },
+    async ({ message_id, profile }) => { await gmail.markAsRead(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Marked as read." }] }; });
+
+server.tool("gmail_archive", "Archive an email (remove from inbox).", { message_id: z.string(), ...profileParam },
+    async ({ message_id, profile }) => { await gmail.archiveMessage(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Archived." }] }; });
+
+server.tool("gmail_trash", "Move an email to trash.", { message_id: z.string(), ...profileParam },
+    async ({ message_id, profile }) => { await gmail.trashMessage(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Trashed." }] }; });
+
+server.tool("gmail_star", "Star an email.", { message_id: z.string(), ...profileParam },
+    async ({ message_id, profile }) => { await gmail.starMessage(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Starred." }] }; });
+
+server.tool("gmail_labels", "List all Gmail labels.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gmail.listLabels(await getGmailAuth(profile))) }] }));
+
+server.tool("gmail_label_create", "Create a Gmail label.", { name: z.string(), ...profileParam },
+    async ({ name, profile }) => ({ content: [{ type: "text", text: json(await gmail.createLabel(await getGmailAuth(profile), name)) }] }));
+
+server.tool("gmail_modify", "Add or remove labels from a message.", { message_id: z.string(), add_labels: z.array(z.string()).optional(), remove_labels: z.array(z.string()).optional(), ...profileParam },
+    async ({ message_id, add_labels, remove_labels, profile }) => { await gmail.modifyMessage(await getGmailAuth(profile), message_id, add_labels || [], remove_labels || []); return { content: [{ type: "text", text: "Labels modified." }] }; });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
 
@@ -1131,6 +1206,41 @@ async function main() {
         res.status(200).end();
     });
 
+    // ── Gmail OAuth ──────────────────────────────────────────────────────
+    app.get("/gmail/auth", (req: any, res: any) => {
+        const profile = req.query.profile || undefined;
+        const redirectUri = `http://127.0.0.1:${httpPort}/gmail/callback`;
+        const url = gmail.getOAuthUrl(redirectUri, profile);
+        res.redirect(url);
+    });
+
+    app.get("/gmail/callback", async (req: any, res: any) => {
+        const code = req.query.code as string;
+        const profile = (req.query.state as string) || "default";
+        if (!code) { res.status(400).send("Missing authorization code."); return; }
+        try {
+            const redirectUri = `http://127.0.0.1:${httpPort}/gmail/callback`;
+            const tokens = await gmail.exchangeCode(code, redirectUri);
+            const storageKey = profileKey("gmail", profile === "default" ? undefined : profile);
+            const creds: Record<string, string> = { refresh_token: tokens.refresh_token };
+            try { db.storeCredential(storageKey, "refresh_token", tokens.refresh_token); } catch {}
+            storeAuthInMemory(storageKey, creds);
+            // Get the email address for confirmation
+            let email = "";
+            try {
+                const auth = { access_token: tokens.access_token };
+                const p = await gmail.getProfile(auth);
+                email = p.email;
+                try { db.storeCredential(storageKey, "email", email); } catch {}
+                storeAuthInMemory(storageKey, { ...creds, email });
+            } catch {}
+            const label = profile !== "default" ? ` (profile: ${profile})` : "";
+            res.send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Gmail Connected &#x2705;</h1><p style="color:#aaa">${email}${label}</p><p style="color:#666">You can close this tab.</p></div></body></html>`);
+        } catch (err: any) {
+            res.status(500).send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Auth Failed</h1><p style="color:#f66">${err.message}</p></div></body></html>`);
+        }
+    });
+
     // ── WhatsApp QR page ──────────────────────────────────────────────────
     app.get("/whatsapp-qr", async (req, res) => {
         const wa = await import("./integrations/whatsapp.js");
@@ -1323,6 +1433,55 @@ function registerAllTools(s: McpServer) {
         async ({ channel, timestamp, profile }) => { await slack.unpinMessage(getSlackAuth(profile), channel, timestamp); return { content: [{ type: "text", text: "Unpinned." }] }; });
     s.tool("slack_pins", "List pinned messages in a channel.", { channel: z.string(), ...profileParam },
         async ({ channel, profile }) => ({ content: [{ type: "text", text: json(await slack.listPins(getSlackAuth(profile), channel)) }] }));
+
+    // Gmail
+    s.tool("gmail_connect", "Connect a Gmail account via OAuth. Opens Google sign-in in the browser.",
+        { profile: z.string().optional().describe("Account name (e.g. 'personal', 'work'). Omit for default.") },
+        async ({ profile }) => {
+            const authUrl = `http://127.0.0.1:${httpPort}/gmail/auth${profile ? `?profile=${profile}` : ""}`;
+            try { await browserCommand("navigate", { url: authUrl }); } catch {}
+            const storageKey = profileKey("gmail", profile);
+            const deadline = Date.now() + 120000;
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 2000));
+                const creds = memCredentials.get(storageKey);
+                if (creds?.refresh_token) {
+                    const label = profile ? ` as "${profile}"` : "";
+                    return { content: [{ type: "text", text: `Gmail connected${label}${creds.email ? ` (${creds.email})` : ""}.` }] };
+                }
+            }
+            return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+        });
+    s.tool("gmail_profile", "Get Gmail profile info.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gmail.getProfile(await getGmailAuth(profile))) }] }));
+    s.tool("gmail_inbox", "Read your Gmail inbox.", { query: z.string().optional(), max_results: z.number().optional(), page_token: z.string().optional(), ...profileParam },
+        async ({ query, max_results, page_token, profile }) => ({ content: [{ type: "text", text: json(await gmail.getInbox(await getGmailAuth(profile), { query, maxResults: max_results || 20, pageToken: page_token })) }] }));
+    s.tool("gmail_search", "Search Gmail messages.", { query: z.string(), max_results: z.number().optional(), page_token: z.string().optional(), ...profileParam },
+        async ({ query, max_results, page_token, profile }) => ({ content: [{ type: "text", text: json(await gmail.searchMail(await getGmailAuth(profile), query, max_results || 20, page_token)) }] }));
+    s.tool("gmail_read", "Read a specific email.", { message_id: z.string(), ...profileParam },
+        async ({ message_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.getMessage(await getGmailAuth(profile), message_id)) }] }));
+    s.tool("gmail_thread", "Read an entire email thread.", { thread_id: z.string(), ...profileParam },
+        async ({ thread_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.getThread(await getGmailAuth(profile), thread_id)) }] }));
+    s.tool("gmail_send", "Send an email.", { to: z.string(), subject: z.string(), body: z.string(), cc: z.string().optional(), bcc: z.string().optional(), thread_id: z.string().optional(), ...profileParam },
+        async ({ to, subject, body, cc, bcc, thread_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.sendEmail(await getGmailAuth(profile), to, subject, body, { cc, bcc, threadId: thread_id })) }] }));
+    s.tool("gmail_reply", "Reply to the last message in a thread.", { thread_id: z.string(), body: z.string(), ...profileParam },
+        async ({ thread_id, body, profile }) => ({ content: [{ type: "text", text: json(await gmail.replyToThread(await getGmailAuth(profile), thread_id, body)) }] }));
+    s.tool("gmail_draft", "Create a draft email.", { to: z.string(), subject: z.string(), body: z.string(), cc: z.string().optional(), bcc: z.string().optional(), thread_id: z.string().optional(), ...profileParam },
+        async ({ to, subject, body, cc, bcc, thread_id, profile }) => ({ content: [{ type: "text", text: json(await gmail.createDraft(await getGmailAuth(profile), to, subject, body, { cc, bcc, threadId: thread_id })) }] }));
+    s.tool("gmail_mark_read", "Mark an email as read.", { message_id: z.string(), ...profileParam },
+        async ({ message_id, profile }) => { await gmail.markAsRead(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Marked as read." }] }; });
+    s.tool("gmail_archive", "Archive an email.", { message_id: z.string(), ...profileParam },
+        async ({ message_id, profile }) => { await gmail.archiveMessage(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Archived." }] }; });
+    s.tool("gmail_trash", "Move an email to trash.", { message_id: z.string(), ...profileParam },
+        async ({ message_id, profile }) => { await gmail.trashMessage(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Trashed." }] }; });
+    s.tool("gmail_star", "Star an email.", { message_id: z.string(), ...profileParam },
+        async ({ message_id, profile }) => { await gmail.starMessage(await getGmailAuth(profile), message_id); return { content: [{ type: "text", text: "Starred." }] }; });
+    s.tool("gmail_labels", "List all Gmail labels.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gmail.listLabels(await getGmailAuth(profile))) }] }));
+    s.tool("gmail_label_create", "Create a Gmail label.", { name: z.string(), ...profileParam },
+        async ({ name, profile }) => ({ content: [{ type: "text", text: json(await gmail.createLabel(await getGmailAuth(profile), name)) }] }));
+    s.tool("gmail_modify", "Add or remove labels from a message.", { message_id: z.string(), add_labels: z.array(z.string()).optional(), remove_labels: z.array(z.string()).optional(), ...profileParam },
+        async ({ message_id, add_labels, remove_labels, profile }) => { await gmail.modifyMessage(await getGmailAuth(profile), message_id, add_labels || [], remove_labels || []); return { content: [{ type: "text", text: "Labels modified." }] }; });
 
     // Collections
     s.tool("collection_create", "Create a new data collection.", {

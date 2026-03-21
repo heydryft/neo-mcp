@@ -133,6 +133,47 @@ Bearer tokens and GraphQL query IDs are extracted automatically from Twitter's J
 | `twitter_post` | Post a tweet or reply |
 | `twitter_search` | Search tweets |
 
+### Slack
+
+> *"Extract my Slack auth and show me unread messages"*
+
+| Tool | What it does |
+|------|---|
+| `slack_channels` | List channels |
+| `slack_read` | Read channel messages with pagination |
+| `slack_thread` | Read a thread |
+| `slack_dms` | Read DMs |
+| `slack_search` | Search messages |
+| `slack_send` | Send a message (with thread reply) |
+| `slack_react` / `slack_unreact` | Add/remove reactions |
+| `slack_edit` / `slack_delete` | Edit or delete messages |
+| `slack_users` / `slack_user_profile` | List users, view profiles |
+| `slack_set_status` | Set your status |
+| `slack_create_channel` / `slack_archive_channel` | Manage channels |
+| `slack_invite` / `slack_kick` | Manage channel members |
+| `slack_pin` / `slack_unpin` / `slack_pins` | Pin management |
+| `slack_set_topic` / `slack_set_purpose` | Set channel topic/purpose |
+
+### Gmail
+
+> *"Connect my Gmail"* → OAuth sign-in → connected
+
+Gmail uses OAuth 2.0. Requires Google OAuth credentials — see [Gmail OAuth Setup](#gmail-oauth-setup) below. Supports multiple accounts via the `profile` parameter (e.g. `gmail_connect(profile: "work")`).
+
+| Tool | What it does |
+|------|---|
+| `gmail_connect` | OAuth sign-in (opens browser) |
+| `gmail_profile` | Account info |
+| `gmail_inbox` | Read inbox with optional search filter |
+| `gmail_search` | Full Gmail search (same syntax as Gmail search bar) |
+| `gmail_read` | Read a specific message |
+| `gmail_thread` | Read an entire thread |
+| `gmail_send` | Send an email (with cc, bcc, thread reply) |
+| `gmail_reply` | Reply to the last message in a thread |
+| `gmail_draft` | Create a draft |
+| `gmail_mark_read` / `gmail_archive` / `gmail_trash` / `gmail_star` | Message actions |
+| `gmail_labels` / `gmail_label_create` / `gmail_modify` | Label management |
+
 ### WhatsApp
 
 > *"Connect to WhatsApp"* → scan the QR code → connected forever
@@ -140,9 +181,18 @@ Bearer tokens and GraphQL query IDs are extracted automatically from Twitter's J
 | Tool | What it does |
 |------|---|
 | `whatsapp_connect` | Connect via QR code (first time) or auto-reconnect |
-| `whatsapp_chats` | List chats with last message + unread count |
-| `whatsapp_read` | Read messages by chat ID, phone number, or contact name |
-| `whatsapp_send` | Send a message |
+| `whatsapp_chats` / `whatsapp_search_chats` | List or search chats |
+| `whatsapp_read` | Read messages with pagination, search, and timestamp cursor |
+| `whatsapp_search` | Search messages across all chats |
+| `whatsapp_send` / `whatsapp_send_media` / `whatsapp_send_location` / `whatsapp_send_contact` | Send text, media, location, contacts |
+| `whatsapp_check_number` / `whatsapp_find_contact` / `whatsapp_add_contact` | Contact management |
+| `whatsapp_profile_pic` / `whatsapp_status` / `whatsapp_update_status` | Profile info |
+| `whatsapp_presence` | Typing indicators, online status |
+| `whatsapp_chat_modify` / `whatsapp_star` / `whatsapp_mark_read` | Chat actions |
+| `whatsapp_block` / `whatsapp_unblock` / `whatsapp_blocklist` | Privacy |
+| `whatsapp_group_*` | Full group management (create, members, invite, settings) |
+| `whatsapp_newsletter_*` | WhatsApp channels |
+| `whatsapp_business_profile` / `whatsapp_catalog` | Business features |
 
 ### Any Website You're Logged Into
 
@@ -266,6 +316,28 @@ The extension connects to the MCP server via WebSocket on `localhost:7890`. Make
 
 **Tokens not extracting?**
 Make sure you're logged into the service in Chrome, then ask Claude to `extract_auth("service_name")`. The extension needs to be loaded and active.
+
+---
+
+## Gmail OAuth Setup
+
+Gmail requires Google OAuth credentials (one-time setup):
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a project and enable the **Gmail API**
+3. Go to **OAuth consent screen** → External → add app name
+4. Go to **Credentials** → Create **OAuth 2.0 Client ID**
+   - Application type: **Web application**
+   - Authorized redirect URI: `http://localhost:3100/gmail/callback`
+5. Set environment variables before starting Neo:
+
+```bash
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com \
+GOOGLE_CLIENT_SECRET=your-secret \
+npm run mcp
+```
+
+You may see a "This app isn't verified" warning from Google — click **Advanced → Go to app (unsafe)** to proceed. This is normal for personal OAuth apps.
 
 ## License
 
