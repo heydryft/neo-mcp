@@ -7,16 +7,18 @@
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1";
 
+// Default OAuth credentials — users can override via env vars.
+// These are safe to ship: OAuth client secrets for installed/web apps
+// are not truly secret (Google's docs confirm this).
+const DEFAULT_CLIENT_ID = "124854636684-gvnkpjojb79nsq25047e2lv1utajm78u.apps.googleusercontent.com";
+const DEFAULT_CLIENT_SECRET = "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";
+
 export function getClientId(): string {
-    const id = process.env.GOOGLE_CLIENT_ID;
-    if (!id) throw new Error("GOOGLE_CLIENT_ID not set. See README for setup instructions.");
-    return id;
+    return process.env.GOOGLE_CLIENT_ID || DEFAULT_CLIENT_ID;
 }
 
 export function getClientSecret(): string {
-    const secret = process.env.GOOGLE_CLIENT_SECRET;
-    if (!secret) throw new Error("GOOGLE_CLIENT_SECRET not set. See README for setup instructions.");
-    return secret;
+    return process.env.GOOGLE_CLIENT_SECRET || DEFAULT_CLIENT_SECRET;
 }
 
 export interface GmailAuth {

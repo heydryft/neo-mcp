@@ -158,7 +158,7 @@ Bearer tokens and GraphQL query IDs are extracted automatically from Twitter's J
 
 > *"Connect my Gmail"* → OAuth sign-in → connected
 
-Gmail uses OAuth 2.0. Requires Google OAuth credentials — see [Gmail OAuth Setup](#gmail-oauth-setup) below. Supports multiple accounts via the `profile` parameter (e.g. `gmail_connect(profile: "work")`).
+Gmail uses OAuth 2.0. Default credentials are included — just call `gmail_connect` and sign in. Supports multiple accounts via the `profile` parameter (e.g. `gmail_connect(profile: "work")`). To use your own OAuth credentials, see [Gmail OAuth Setup](#gmail-oauth-setup).
 
 | Tool | What it does |
 |------|---|
@@ -321,7 +321,9 @@ Make sure you're logged into the service in Chrome, then ask Claude to `extract_
 
 ## Gmail OAuth Setup
 
-Gmail requires Google OAuth credentials (one-time setup):
+Neo ships default OAuth credentials so `gmail_connect` works out of the box. You may see a "This app isn't verified" warning — click **Advanced → Go to app (unsafe)** to proceed.
+
+To use your own credentials instead:
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com)
 2. Create a project and enable the **Gmail API**
@@ -337,7 +339,7 @@ GOOGLE_CLIENT_SECRET=your-secret \
 npm run mcp
 ```
 
-You may see a "This app isn't verified" warning from Google — click **Advanced → Go to app (unsafe)** to proceed. This is normal for personal OAuth apps.
+This bypasses the "unverified app" warning since the credentials are yours.
 
 ## License
 
