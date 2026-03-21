@@ -20,6 +20,7 @@ import * as linkedin from "./integrations/linkedin.js";
 import * as twitter from "./integrations/twitter.js";
 import * as slack from "./integrations/slack.js";
 import * as gmail from "./integrations/gmail.js";
+import * as github from "./integrations/github.js";
 import * as db from "./db.js";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge.js";
 
@@ -28,6 +29,7 @@ const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user
 ## Built-in services
 - LinkedIn: extract_auth("linkedin") once, then use linkedin_* tools
 - Twitter/X: extract_auth("twitter") once, then use twitter_* tools
+- GitHub: extract_auth("github") once, then use github_* tools (repos, issues, PRs, actions, gists, search)
 - Slack: extract_auth("slack") once, then use slack_* tools
 - Gmail: gmail_connect (OAuth sign-in, supports multiple accounts via profile param)
 - WhatsApp: whatsapp_connect (QR code first time, auto-reconnects after)
@@ -123,6 +125,12 @@ async function getGmailAuth(profile?: string): Promise<gmail.GmailAuth> {
     if (!creds.refresh_token) throw new Error(`Gmail not connected${profile ? ` for profile "${profile}"` : ""}. Use gmail_connect to authenticate.`);
     const access_token = await gmail.refreshAccessToken(creds.refresh_token, profile || "default");
     return { access_token };
+}
+
+function getGitHubAuth(profile?: string): github.GitHubAuth {
+    const creds = getAuth(profileKey("github", profile));
+    const token = creds.token || creds.access_token || creds.pat || "";
+    return { token, _cookies: creds._cookies };
 }
 
 function getSlackAuth(profile?: string): slack.SlackAuth {
@@ -479,6 +487,67 @@ server.tool(
         return { content: [{ type: "text", text: json(tweets) }] };
     }
 );
+
+// ── GitHub ────────────────────────────────────────────────────────────────────
+
+server.tool("github_me", "Get your authenticated GitHub profile.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await github.getAuthenticatedUser(getGitHubAuth(profile))) }] }));
+server.tool("github_user", "Get a GitHub user's profile.", { username: z.string(), ...profileParam },
+    async ({ username, profile }) => ({ content: [{ type: "text", text: json(await github.getUserProfile(getGitHubAuth(profile), username)) }] }));
+server.tool("github_repos", "List your GitHub repos.", { count: z.number().optional(), sort: z.enum(["updated", "created", "pushed", "full_name"]).optional(), ...profileParam },
+    async ({ count, sort, profile }) => ({ content: [{ type: "text", text: json(await github.listMyRepos(getGitHubAuth(profile), count || 30, sort || "updated")) }] }));
+server.tool("github_repo", "Get details about a GitHub repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+    async ({ owner, repo, profile }) => ({ content: [{ type: "text", text: json(await github.getRepo(getGitHubAuth(profile), owner, repo)) }] }));
+server.tool("github_search_repos", "Search GitHub repositories.", { query: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchRepos(getGitHubAuth(profile), query, count || 20)) }] }));
+server.tool("github_issues", "List issues for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), labels: z.string().optional(), count: z.number().optional(), ...profileParam },
+    async ({ owner, repo, state, labels, count, profile }) => ({ content: [{ type: "text", text: json(await github.listIssues(getGitHubAuth(profile), owner, repo, { state, labels, count })) }] }));
+server.tool("github_issue", "Get a specific issue.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getIssue(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_create_issue", "Create a GitHub issue.", { owner: z.string(), repo: z.string(), title: z.string(), body: z.string().optional(), labels: z.array(z.string()).optional(), assignees: z.array(z.string()).optional(), ...profileParam },
+    async ({ owner, repo, title, body, labels, assignees, profile }) => ({ content: [{ type: "text", text: json(await github.createIssue(getGitHubAuth(profile), owner, repo, title, body, labels, assignees)) }] }));
+server.tool("github_comment_issue", "Comment on a GitHub issue or PR.", { owner: z.string(), repo: z.string(), number: z.number(), body: z.string(), ...profileParam },
+    async ({ owner, repo, number, body, profile }) => ({ content: [{ type: "text", text: json(await github.commentOnIssue(getGitHubAuth(profile), owner, repo, number, body)) }] }));
+server.tool("github_prs", "List pull requests for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), count: z.number().optional(), ...profileParam },
+    async ({ owner, repo, state, count, profile }) => ({ content: [{ type: "text", text: json(await github.listPRs(getGitHubAuth(profile), owner, repo, { state, count })) }] }));
+server.tool("github_pr", "Get details about a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPR(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_pr_files", "Get files changed in a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRFiles(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_create_pr", "Create a pull request.", { owner: z.string(), repo: z.string(), title: z.string(), head: z.string(), base: z.string(), body: z.string().optional(), draft: z.boolean().optional(), ...profileParam },
+    async ({ owner, repo, title, head, base, body, draft, profile }) => ({ content: [{ type: "text", text: json(await github.createPR(getGitHubAuth(profile), owner, repo, title, head, base, body, draft)) }] }));
+server.tool("github_merge_pr", "Merge a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), method: z.enum(["merge", "squash", "rebase"]).optional(), commit_message: z.string().optional(), ...profileParam },
+    async ({ owner, repo, number, method, commit_message, profile }) => ({ content: [{ type: "text", text: json(await github.mergePR(getGitHubAuth(profile), owner, repo, number, method || "merge", commit_message)) }] }));
+server.tool("github_pr_reviews", "Get reviews on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRReviews(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_review_pr", "Submit a review on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]), body: z.string().optional(), ...profileParam },
+    async ({ owner, repo, number, event, body, profile }) => ({ content: [{ type: "text", text: json(await github.createPRReview(getGitHubAuth(profile), owner, repo, number, event, body)) }] }));
+server.tool("github_notifications", "Get your GitHub notifications.", { count: z.number().optional(), all: z.boolean().optional(), ...profileParam },
+    async ({ count, all, profile }) => ({ content: [{ type: "text", text: json(await github.getNotifications(getGitHubAuth(profile), count || 30, all || false)) }] }));
+server.tool("github_mark_notification_read", "Mark a notification as read.", { thread_id: z.string(), ...profileParam },
+    async ({ thread_id, profile }) => { await github.markNotificationRead(getGitHubAuth(profile), thread_id); return { content: [{ type: "text", text: "Marked as read." }] }; });
+server.tool("github_search_code", "Search code on GitHub.", { query: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchCode(getGitHubAuth(profile), query, count || 20)) }] }));
+server.tool("github_search_users", "Search GitHub users.", { query: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchUsers(getGitHubAuth(profile), query, count || 20)) }] }));
+server.tool("github_starred", "List your starred repos.", { count: z.number().optional(), ...profileParam },
+    async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listStarred(getGitHubAuth(profile), count || 30)) }] }));
+server.tool("github_star", "Star a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+    async ({ owner, repo, profile }) => { await github.starRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Starred." }] }; });
+server.tool("github_unstar", "Unstar a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+    async ({ owner, repo, profile }) => { await github.unstarRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Unstarred." }] }; });
+server.tool("github_gists", "List your gists.", { count: z.number().optional(), ...profileParam },
+    async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listGists(getGitHubAuth(profile), count || 20)) }] }));
+server.tool("github_create_gist", "Create a gist.", { files: z.record(z.string(), z.string()).describe("Filename → content map"), description: z.string().optional(), public: z.boolean().optional(), ...profileParam },
+    async ({ files, description, public: isPublic, profile }) => ({ content: [{ type: "text", text: json(await github.createGist(getGitHubAuth(profile), files, description, isPublic || false)) }] }));
+server.tool("github_actions", "List recent workflow runs for a repo.", { owner: z.string(), repo: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ owner, repo, count, profile }) => ({ content: [{ type: "text", text: json(await github.listWorkflowRuns(getGitHubAuth(profile), owner, repo, count || 10)) }] }));
+server.tool("github_action_run", "Get details about a workflow run.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+    async ({ owner, repo, run_id, profile }) => ({ content: [{ type: "text", text: json(await github.getWorkflowRun(getGitHubAuth(profile), owner, repo, run_id)) }] }));
+server.tool("github_rerun_workflow", "Re-run a failed workflow.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+    async ({ owner, repo, run_id, profile }) => { await github.rerunWorkflow(getGitHubAuth(profile), owner, repo, run_id); return { content: [{ type: "text", text: "Re-run triggered." }] }; });
+server.tool("github_file", "Get file or directory contents from a repo.", { owner: z.string(), repo: z.string(), path: z.string(), ref: z.string().optional().describe("Branch, tag, or commit SHA"), ...profileParam },
+    async ({ owner, repo, path, ref, profile }) => ({ content: [{ type: "text", text: json(await github.getFileContent(getGitHubAuth(profile), owner, repo, path, ref)) }] }));
 
 // ── Collections (agent-designed data storage) ────────────────────────────────
 
@@ -1235,6 +1304,7 @@ async function main() {
     // Wire browser command into integrations so they route through the extension
     linkedin.setBrowserCommand(browserCommand);
     twitter.setBrowserCommand(browserCommand);
+    github.setBrowserCommand(browserCommand);
 
     // Load and register all saved custom tools (graceful — db may fail on Linux VM)
     try {
@@ -1505,6 +1575,66 @@ function registerAllTools(s: McpServer) {
         async ({ text, reply_to, profile }) => ({ content: [{ type: "text", text: json(await twitter.createTweet(getTwitterAuth(profile), text, reply_to)) }] }));
     s.tool("twitter_search", "Search tweets.", { query: z.string(), count: z.number().optional(), ...profileParam },
         async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await twitter.searchTweets(getTwitterAuth(profile), query, count || 20)) }] }));
+
+    // GitHub
+    s.tool("github_me", "Get your authenticated GitHub profile.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await github.getAuthenticatedUser(getGitHubAuth(profile))) }] }));
+    s.tool("github_user", "Get a GitHub user's profile.", { username: z.string(), ...profileParam },
+        async ({ username, profile }) => ({ content: [{ type: "text", text: json(await github.getUserProfile(getGitHubAuth(profile), username)) }] }));
+    s.tool("github_repos", "List your GitHub repos.", { count: z.number().optional(), sort: z.enum(["updated", "created", "pushed", "full_name"]).optional(), ...profileParam },
+        async ({ count, sort, profile }) => ({ content: [{ type: "text", text: json(await github.listMyRepos(getGitHubAuth(profile), count || 30, sort || "updated")) }] }));
+    s.tool("github_repo", "Get details about a GitHub repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+        async ({ owner, repo, profile }) => ({ content: [{ type: "text", text: json(await github.getRepo(getGitHubAuth(profile), owner, repo)) }] }));
+    s.tool("github_search_repos", "Search GitHub repositories.", { query: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchRepos(getGitHubAuth(profile), query, count || 20)) }] }));
+    s.tool("github_issues", "List issues for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), labels: z.string().optional(), count: z.number().optional(), ...profileParam },
+        async ({ owner, repo, state, labels, count, profile }) => ({ content: [{ type: "text", text: json(await github.listIssues(getGitHubAuth(profile), owner, repo, { state, labels, count })) }] }));
+    s.tool("github_issue", "Get a specific issue.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getIssue(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_create_issue", "Create a GitHub issue.", { owner: z.string(), repo: z.string(), title: z.string(), body: z.string().optional(), labels: z.array(z.string()).optional(), assignees: z.array(z.string()).optional(), ...profileParam },
+        async ({ owner, repo, title, body, labels, assignees, profile }) => ({ content: [{ type: "text", text: json(await github.createIssue(getGitHubAuth(profile), owner, repo, title, body, labels, assignees)) }] }));
+    s.tool("github_comment_issue", "Comment on a GitHub issue or PR.", { owner: z.string(), repo: z.string(), number: z.number(), body: z.string(), ...profileParam },
+        async ({ owner, repo, number, body, profile }) => ({ content: [{ type: "text", text: json(await github.commentOnIssue(getGitHubAuth(profile), owner, repo, number, body)) }] }));
+    s.tool("github_prs", "List pull requests for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), count: z.number().optional(), ...profileParam },
+        async ({ owner, repo, state, count, profile }) => ({ content: [{ type: "text", text: json(await github.listPRs(getGitHubAuth(profile), owner, repo, { state, count })) }] }));
+    s.tool("github_pr", "Get details about a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPR(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_pr_files", "Get files changed in a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRFiles(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_create_pr", "Create a pull request.", { owner: z.string(), repo: z.string(), title: z.string(), head: z.string(), base: z.string(), body: z.string().optional(), draft: z.boolean().optional(), ...profileParam },
+        async ({ owner, repo, title, head, base, body, draft, profile }) => ({ content: [{ type: "text", text: json(await github.createPR(getGitHubAuth(profile), owner, repo, title, head, base, body, draft)) }] }));
+    s.tool("github_merge_pr", "Merge a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), method: z.enum(["merge", "squash", "rebase"]).optional(), commit_message: z.string().optional(), ...profileParam },
+        async ({ owner, repo, number, method, commit_message, profile }) => ({ content: [{ type: "text", text: json(await github.mergePR(getGitHubAuth(profile), owner, repo, number, method || "merge", commit_message)) }] }));
+    s.tool("github_pr_reviews", "Get reviews on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRReviews(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_review_pr", "Submit a review on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]), body: z.string().optional(), ...profileParam },
+        async ({ owner, repo, number, event, body, profile }) => ({ content: [{ type: "text", text: json(await github.createPRReview(getGitHubAuth(profile), owner, repo, number, event, body)) }] }));
+    s.tool("github_notifications", "Get your GitHub notifications.", { count: z.number().optional(), all: z.boolean().optional(), ...profileParam },
+        async ({ count, all, profile }) => ({ content: [{ type: "text", text: json(await github.getNotifications(getGitHubAuth(profile), count || 30, all || false)) }] }));
+    s.tool("github_mark_notification_read", "Mark a notification as read.", { thread_id: z.string(), ...profileParam },
+        async ({ thread_id, profile }) => { await github.markNotificationRead(getGitHubAuth(profile), thread_id); return { content: [{ type: "text", text: "Marked as read." }] }; });
+    s.tool("github_search_code", "Search code on GitHub.", { query: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchCode(getGitHubAuth(profile), query, count || 20)) }] }));
+    s.tool("github_search_users", "Search GitHub users.", { query: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchUsers(getGitHubAuth(profile), query, count || 20)) }] }));
+    s.tool("github_starred", "List your starred repos.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listStarred(getGitHubAuth(profile), count || 30)) }] }));
+    s.tool("github_star", "Star a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+        async ({ owner, repo, profile }) => { await github.starRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Starred." }] }; });
+    s.tool("github_unstar", "Unstar a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+        async ({ owner, repo, profile }) => { await github.unstarRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Unstarred." }] }; });
+    s.tool("github_gists", "List your gists.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listGists(getGitHubAuth(profile), count || 20)) }] }));
+    s.tool("github_create_gist", "Create a gist.", { files: z.record(z.string(), z.string()).describe("Filename → content map"), description: z.string().optional(), public: z.boolean().optional(), ...profileParam },
+        async ({ files, description, public: isPublic, profile }) => ({ content: [{ type: "text", text: json(await github.createGist(getGitHubAuth(profile), files, description, isPublic || false)) }] }));
+    s.tool("github_actions", "List recent workflow runs.", { owner: z.string(), repo: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ owner, repo, count, profile }) => ({ content: [{ type: "text", text: json(await github.listWorkflowRuns(getGitHubAuth(profile), owner, repo, count || 10)) }] }));
+    s.tool("github_action_run", "Get details about a workflow run.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+        async ({ owner, repo, run_id, profile }) => ({ content: [{ type: "text", text: json(await github.getWorkflowRun(getGitHubAuth(profile), owner, repo, run_id)) }] }));
+    s.tool("github_rerun_workflow", "Re-run a failed workflow.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+        async ({ owner, repo, run_id, profile }) => { await github.rerunWorkflow(getGitHubAuth(profile), owner, repo, run_id); return { content: [{ type: "text", text: "Re-run triggered." }] }; });
+    s.tool("github_file", "Get file or directory contents from a repo.", { owner: z.string(), repo: z.string(), path: z.string(), ref: z.string().optional().describe("Branch, tag, or commit SHA"), ...profileParam },
+        async ({ owner, repo, path, ref, profile }) => ({ content: [{ type: "text", text: json(await github.getFileContent(getGitHubAuth(profile), owner, repo, path, ref)) }] }));
 
     // Slack
     s.tool("slack_channels", "List Slack channels.", { ...profileParam },
