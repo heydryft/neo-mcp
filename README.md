@@ -1,3 +1,5 @@
+<img width="2752" height="1536" alt="image" src="https://github.com/user-attachments/assets/9d1d575a-c1d7-4aae-94f4-0e480f4b1d31" />
+
 # Neo MCP
 
 Give Claude access to your real accounts — LinkedIn, Twitter/X, WhatsApp, and any website you're logged into. No API keys. No OAuth. Neo grabs auth tokens straight from your browser.
