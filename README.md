@@ -168,15 +168,28 @@ No pre-built integration needed — these work on any site:
 |------|---|
 | `extract_auth` | Grab auth tokens from any logged-in session (Slack, Discord, GitHub, Notion, Salesforce, anything) |
 | `authenticated_fetch` | Make HTTP requests carrying the browser's cookies/auth |
-| `discover_api` | Capture network traffic to find a site's API endpoints |
+| `network_capture` | Start, stop, or clear network request capture in the browser |
+| `network_requests` | List captured requests (ID, method, status, URL) |
+| `network_request_detail` | Get full headers and body for a captured request |
+| `bridge_status` | Check if the Chrome extension is connected |
+
+### API Discovery Workflow
+
+To reverse-engineer any site's API:
+
+1. `network_capture(action: "start", navigate: "notion.so")` — start capturing traffic
+2. Interact with the site (or ask Claude to navigate)
+3. `network_requests()` — list all captured API calls
+4. `network_request_detail(id)` — inspect headers, body, auth patterns
+5. `network_capture(action: "stop")` — stop capturing
 
 ### Build New Integrations On The Fly
 
 Tell Claude: *"Build me a Notion integration"* and it will:
 
 1. `extract_auth("notion")` — grab your Notion token from Chrome
-2. `discover_api(start, navigate: "notion.so")` — capture Notion's API traffic
-3. `discover_api(list)` — see all the endpoints
+2. `network_capture(action: "start", navigate: "notion.so")` — capture Notion's API traffic
+3. `network_requests()` — see all the endpoints
 4. `create_tool(...)` — write a JavaScript tool and register it as a real MCP tool
 
 Custom tools are available immediately and persist across restarts.
@@ -184,6 +197,7 @@ Custom tools are available immediately and persist across restarts.
 | Tool | What it does |
 |------|---|
 | `create_tool` | Create a new MCP tool with JavaScript |
+| `update_tool` | Update an existing custom tool's description, params, or code |
 | `list_custom_tools` | List all AI-created tools |
 | `get_tool_code` | View a custom tool's source |
 | `delete_tool` | Remove a custom tool |
@@ -200,6 +214,24 @@ Claude can create its own database tables to store anything it collects.
 | `collection_update` | Update a row by ID |
 | `collection_delete` | Delete a row by ID |
 | `collection_list` | List all collections |
+
+### Analytics
+
+Track and monitor engagement across LinkedIn and Twitter posts over time.
+
+| Tool | What it does |
+|------|---|
+| `content_monitor` | Fetch analytics on your recent posts (engagement rates, top performers) |
+| `track_post` | Add a post to ongoing monitoring |
+| `analytics_report` | Summary report of all tracked posts' performance |
+
+### Credential Management
+
+| Tool | What it does |
+|------|---|
+| `list_credentials` | List all stored service credentials (keys only, not values) |
+| `store_credential` | Manually store a credential for a service |
+| `list_profiles` | List all stored profiles for a service |
 
 ### Multi-Profile Support
 
