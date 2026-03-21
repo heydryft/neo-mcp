@@ -624,8 +624,10 @@ export async function getConversationMessages(auth: LinkedInAuth, conversationId
         convUrn = `urn:li:msg_conversation:(${id})`;
     }
 
-    // Percent-encode colons in URN for messaging GraphQL variables
-    const encodedConvUrn = convUrn.replace(/:/g, "%3A");
+    // Full encode on the URN — LinkedIn requires encoded colons, parentheses, commas,
+    // and equals signs within URN values. encodeURIComponent skips parens so we add those.
+    const encodedConvUrn = encodeURIComponent(convUrn)
+        .replace(/\(/g, "%28").replace(/\)/g, "%29");
 
     const data = await linkedinApi(auth, `/voyagerMessagingGraphQL/graphql`, {
         params: {
@@ -782,53 +784,69 @@ export async function commentOnPost(auth: LinkedInAuth, postUrn: string, text: s
     return { commented: true, urn: data.urn || data.value?.urn || null };
 }
 
-/** Get comments on a post */
+/** Get comments on a post via GraphQL */
 export async function getPostComments(auth: LinkedInAuth, postUrn: string, count = 20): Promise<any[]> {
-    const data = await linkedinApi(auth, `/feed/comments`, {
+    // Extract the activity ID from various URN formats
+    let activityUrn = postUrn;
+    if (postUrn.includes(":ugcPost:")) activityUrn = postUrn.replace(":ugcPost:", ":activity:");
+    else if (postUrn.includes(":share:")) activityUrn = postUrn.replace(":share:", ":activity:");
+    // Strip fsd_update wrapper if present: urn:li:fsd_update:(urn:li:activity:XXX,...) → urn:li:activity:XXX
+    const activityMatch = activityUrn.match(/urn:li:activity:\d+/);
+    if (activityMatch) activityUrn = activityMatch[0];
+
+    // Build the socialDetailUrn — LinkedIn uses (activity,activity,highlightedReply:-) format.
+    // encodeURIComponent skips parens, so we encode those manually too.
+    const encodedSocialDetail = encodeURIComponent(
+        `urn:li:fsd_socialDetail:(${activityUrn},${activityUrn},urn:li:highlightedReply:-)`
+    ).replace(/\(/g, "%28").replace(/\)/g, "%29");
+
+    const data = await linkedinApi(auth, `/graphql`, {
         params: {
-            q: "comments",
-            updateUrn: postUrn,
-            count: String(count),
-            start: "0",
-            sortOrder: "RELEVANCE",
+            variables: `(count:${count},numReplies:0,socialDetailUrn:${encodedSocialDetail},sortOrder:RELEVANCE,start:0)`,
+            queryId: "voyagerSocialDashComments.afec6d88d7810d45548797a8dac4fb87",
         },
     });
 
-    const included: any[] = data.included || [];
-    const elements: any[] = data.elements || included;
+    const included: any[] = data?.included || [];
 
-    // Build URN map for author lookup
+    // Build URN map
     const byUrn = new Map<string, any>();
     for (const item of included) {
         const urn = item.entityUrn;
         if (urn) byUrn.set(urn, item);
     }
 
-    return elements
-        .filter((e: any) => e.commentary || e.comment || e.message)
-        .slice(0, count)
-        .map((c: any) => {
-            const commentText = c.commentary?.text?.text
-                || c.commentary?.text
-                || c.comment?.values?.[0]?.value
-                || c.message?.text
-                || "";
+    const comments: any[] = [];
+    for (const item of included) {
+        if (comments.length >= count) break;
+        // Comment entities have commentary field
+        const isComment = item.$type?.includes("Comment") || item.commentary;
+        if (!isComment) continue;
 
-            // Resolve author
-            const authorRef = c["*commenter"] || c["*author"] || c.commenter;
-            const author = authorRef ? byUrn.get(authorRef) : null;
-            const authorName = author
-                ? `${author.firstName || ""} ${author.lastName || ""}`.trim()
-                : "";
+        const commentText = item.commentary?.text?.text
+            || item.commentary?.text
+            || item.comment?.values?.[0]?.value
+            || "";
+        if (!commentText) continue;
 
-            return {
-                text: commentText.slice(0, 500),
-                author: authorName,
-                likes: c.numLikes || c.socialDetail?.totalSocialActivityCounts?.numLikes || 0,
-                created: c.createdAt ? new Date(c.createdAt).toISOString() : null,
-                urn: c.entityUrn || "",
-            };
+        // Resolve commenter — may be inline object or URN reference
+        const commenterInline = typeof item.commenter === "object" ? item.commenter : null;
+        const commenterRef = item["*commenter"];
+        const commenter = commenterInline || (commenterRef ? byUrn.get(commenterRef) : null);
+        const authorName = commenter?.title?.text
+            || `${commenter?.firstName || ""} ${commenter?.lastName || ""}`.trim()
+            || "";
+
+        comments.push({
+            text: commentText.slice(0, 500),
+            author: authorName,
+            likes: item.socialDetail?.totalSocialActivityCounts?.numLikes || item.numLikes || 0,
+            created: item.createdAt ? new Date(item.createdAt).toISOString() : null,
+            urn: item.entityUrn || "",
         });
+    }
+
+    return comments;
 }
 
 // ── Notifications ────────────────────────────────────────────────────────────
