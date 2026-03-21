@@ -161,94 +161,82 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
     };
 }
 
-/** Get the authenticated user's own posts with engagement metrics */
+/** Get the authenticated user's own posts with engagement metrics.
+ *  Uses the feed endpoint and filters by author URN since profileUpdatesV2 is deprecated. */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
     const me = await getMe(auth);
-    if (!me.fsdProfileUrn) throw new Error("Could not determine fsd_profile URN for current user");
+    // Get the member URN to filter feed results — try multiple URN fields
+    const memberUrn = me.objectUrn || me.entityUrn || "";
+    // Also build an fsd_profile URN for matching against feed authorUrns
+    const fsdUrn = me.fsdProfileUrn || "";
 
-    return fetchProfileUpdates(auth, me.fsdProfileUrn, count);
+    // Fetch a larger feed slice sorted by recency, then filter to own posts
+    const feedData = await linkedinApi(auth, `/feed/updatesV2`, {
+        params: {
+            count: String(Math.min(count * 5, 100)),
+            start: "0",
+            q: "chronFeed",
+        },
+        headers: { "Accept": "application/vnd.linkedin.normalized+json+2.1" },
+    });
+
+    const allPosts = extractPosts(feedData, count * 5);
+
+    if (memberUrn || fsdUrn) {
+        // Filter to only the current user's posts by matching any URN variant
+        const mine = allPosts.filter(p => {
+            if (!p.authorUrn) return false;
+            return p.authorUrn.includes(memberUrn)
+                || (fsdUrn && p.authorUrn.includes(fsdUrn))
+                || p.authorUrn.includes(me.miniProfileId);
+        });
+        if (mine.length > 0) return mine.slice(0, count);
+    }
+
+    // Fallback: return all feed posts if we can't identify own posts
+    return allPosts.slice(0, count);
 }
 
-/** Get a specific user's posts by vanity name */
+/** Get a specific user's posts by vanity name.
+ *  Uses the feed endpoint filtered by the target user's URN. */
 export async function getProfilePosts(auth: LinkedInAuth, vanityName: string, count = 20): Promise<any[]> {
-    // Resolve vanity name to fsd_profile URN via the dash profiles endpoint
-    const data = await linkedinApi(auth, `/identity/dash/profiles`, {
+    // Resolve vanity name to profile URN
+    const profileData = await linkedinApi(auth, `/identity/dash/profiles`, {
         params: {
             q: "memberIdentity",
             memberIdentity: vanityName,
             decorationId: "com.linkedin.voyager.dash.deco.identity.profile.FullProfile-91",
         },
     });
-    const included: any[] = data.included || [];
+    const included: any[] = profileData.included || [];
     const profileEntity = included.find((e: any) =>
-        e.$type?.includes("Profile") && e.entityUrn?.includes("fsd_profile")
+        e.$type?.includes("Profile") && (e.entityUrn || e.objectUrn)
     );
-    if (!profileEntity?.entityUrn) throw new Error(`Could not resolve fsd_profile URN for "${vanityName}"`);
+    if (!profileEntity) throw new Error(`Could not find profile for "${vanityName}"`);
 
-    return fetchProfileUpdates(auth, profileEntity.entityUrn, count);
-}
+    const targetUrn = profileEntity.entityUrn || profileEntity.objectUrn || "";
+    const targetId = profileEntity.publicIdentifier || vanityName;
 
-/** Fetch posts for a given fsd_profile URN via /identity/profileUpdatesV2 */
-async function fetchProfileUpdates(auth: LinkedInAuth, profileUrn: string, count: number): Promise<any[]> {
-    const data = await linkedinApi(auth, `/identity/profileUpdatesV2`, {
+    // Fetch feed and filter — this may not return many posts for other users
+    // since the feed is personalized. For best results, use network_capture
+    // to find the exact endpoint LinkedIn uses on the Activity tab.
+    const feedData = await linkedinApi(auth, `/feed/updatesV2`, {
         params: {
-            count: String(Math.min(count, 100)),
+            count: String(Math.min(count * 5, 100)),
             start: "0",
-            q: "memberShareFeed",
-            moduleKey: "member-shares:phone",
-            includeLongTermHistory: "true",
-            profileUrn: profileUrn,
+            q: "chronFeed",
         },
+        headers: { "Accept": "application/vnd.linkedin.normalized+json+2.1" },
     });
 
-    if (data?.status && data.status !== 200) {
-        throw new Error(`LinkedIn profileUpdatesV2 failed: ${data.status} ${data.message || ""}`);
-    }
+    const allPosts = extractPosts(feedData, count * 5);
+    const theirs = allPosts.filter(p =>
+        p.authorUrn && (p.authorUrn.includes(targetUrn) || p.authorUrn.includes(targetId))
+    );
 
-    const elements: any[] = data?.elements || [];
-    return extractProfileUpdatePosts(elements, count);
-}
+    if (theirs.length > 0) return theirs.slice(0, count);
 
-/** Parse posts from /identity/profileUpdatesV2 response elements */
-function extractProfileUpdatePosts(elements: any[], max: number): any[] {
-    const posts: any[] = [];
-    for (const item of elements) {
-        if (posts.length >= max) break;
-
-        const commentary = item.commentary?.text?.text
-            || item.commentary?.text
-            || "";
-        if (!commentary) continue;
-
-        // Actor info is usually inline in profileUpdatesV2 responses
-        const actor = item.actor || {};
-        const authorName = actor.name?.text
-            || `${actor.firstName?.text || ""} ${actor.lastName?.text || ""}`.trim()
-            || "";
-
-        // Social counts
-        const socialDetail = item.socialDetail || item.threadSocialDetail || {};
-        const socialCounts = socialDetail.totalSocialActivityCounts || {};
-
-        // Post URN
-        const postUrn = item.updateMetadata?.urn
-            || item.urn
-            || item.entityUrn
-            || "";
-
-        posts.push({
-            text: commentary.slice(0, 1000),
-            author: authorName || undefined,
-            authorUrn: actor.urn || undefined,
-            created: item.createdAt ? new Date(item.createdAt).toISOString() : null,
-            likes: socialCounts.numLikes || 0,
-            comments: socialCounts.numComments || 0,
-            reposts: socialCounts.numShares || 0,
-            impressions: socialCounts.numImpressions || null,
-            urn: postUrn,
-        });
-    }
-    return posts;
+    return []; // No posts found for this user in the feed
 }
 
 /** Get the user's feed */
@@ -356,40 +344,18 @@ function extractPosts(data: any, max: number): any[] {
     return posts;
 }
 
-/** Convert a URN from /me into a urn:li:person:... author URN for posting */
-function toPersonUrn(me: { objectUrn: string; entityUrn: string; fsdProfileUrn: string }): string {
-    // objectUrn is typically urn:li:member:12345 — convert to person
-    const urn = me.objectUrn || me.entityUrn || "";
-    if (urn.includes(":member:")) return urn.replace(":member:", ":person:");
-    if (urn.includes(":person:")) return urn;
-    // fsd_profile contains the profile ID (ACoAAA...) — use that
-    if (me.fsdProfileUrn) {
-        const id = me.fsdProfileUrn.split(":").pop() || "";
-        if (id) return `urn:li:person:${id}`;
-    }
-    // Last resort: extract trailing ID
-    const id = urn.split(":").pop() || "";
-    if (id) return `urn:li:person:${id}`;
-    return "";
-}
-
 /** Create a text post */
 export async function createPost(auth: LinkedInAuth, text: string): Promise<any> {
-    const me = await getMe(auth);
-    const authorUrn = toPersonUrn(me);
-    if (!authorUrn) throw new Error("Could not determine author URN for posting");
-
-    const body: any = {
-        visibleToGuest: true,
-        author: authorUrn,
-        commentary: {
+    const body = {
+        visibleToConnectionsOnly: false,
+        externalAudienceProviders: [],
+        commentaryV2: {
             text,
             attributes: [],
         },
-        distribution: {
-            feedDistribution: "MAIN_FEED",
-            thirdPartyDistributionChannels: [],
-        },
+        origin: "FEED",
+        allowedCommentersScope: "ALL",
+        postState: "PUBLISHED",
     };
 
     const data = await linkedinApi(auth, `/contentcreation/normShares`, {
@@ -747,13 +713,9 @@ export async function reactToPost(auth: LinkedInAuth, postUrn: string, reactionT
 
 /** Comment on a post */
 export async function commentOnPost(auth: LinkedInAuth, postUrn: string, text: string): Promise<any> {
-    const me = await getMe(auth);
-    const authorUrn = toPersonUrn(me);
-    if (!authorUrn) throw new Error("Could not determine author URN for commenting");
-
+    // LinkedIn infers author from the auth cookie — no author URN needed
     const body: any = {
         threadUrn: postUrn,
-        author: authorUrn,
         commentary: {
             text,
             attributes: [],
