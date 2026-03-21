@@ -1376,6 +1376,122 @@ server.tool(
     }
 );
 
+// ── Universal API Discovery ──────────────────────────────────────────────────
+
+server.tool(
+    "discover_api",
+    `Discover a website's internal API by navigating to it and capturing network requests. This automates the API discovery workflow:
+1. Extracts auth tokens from the target site
+2. Starts network capture and navigates to the specified URL
+3. Waits for API requests to load
+4. Returns all captured API endpoints with their methods, URLs, status codes, and headers
+5. Suggests which endpoints are useful and how to call them
+
+Use this as the first step when building a new integration for ANY website.`,
+    {
+        url: z.string().describe("The URL to navigate to and discover APIs from (e.g. 'https://app.example.com/dashboard')"),
+        service: z.string().optional().describe("Service name for auth extraction (e.g. 'example.com'). Auto-detected from URL if omitted."),
+        filters: z.array(z.string()).optional().describe("URL substrings to capture (e.g. ['api.', 'graphql']). Empty captures all requests."),
+        wait_seconds: z.number().optional().describe("How long to wait for API requests (default: 5s, max: 15s)"),
+    },
+    async ({ url, service, filters, wait_seconds }) => {
+        if (!isBridgeConnected()) {
+            return { content: [{ type: "text", text: "Browser extension not connected. Install the Neo Bridge extension and make sure Chrome is running." }] };
+        }
+
+        const results: string[] = [];
+        const domain = service || new URL(url).hostname;
+
+        // Step 1: Extract auth
+        results.push(`## Step 1: Extracting auth from ${domain}...`);
+        try {
+            const authResult = await browserCommand("extract_auth", { service: domain });
+            const storageKey = domain;
+            const creds: Record<string, string> = {};
+            for (const [key, value] of Object.entries(authResult)) {
+                if (key === "service" || !value || typeof value !== "string") continue;
+                creds[key] = value as string;
+                try { db.storeCredential(storageKey, key, value as string); } catch {}
+            }
+            if (Array.isArray(authResult.cookies) && authResult.cookies.length > 0) {
+                const cookieHeader = authResult.cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
+                creds._cookies = cookieHeader;
+                try { db.storeCredential(storageKey, "_cookies", cookieHeader); } catch {}
+            }
+            storeAuthInMemory(storageKey, creds);
+            const tokenKeys = Object.keys(creds).filter(k => !k.startsWith("_"));
+            results.push(`✅ Auth extracted. Tokens: ${tokenKeys.join(", ") || "cookies only"}`);
+        } catch (err: any) {
+            results.push(`⚠️ Auth extraction failed: ${err.message}. Continuing anyway...`);
+        }
+
+        // Step 2: Start network capture and navigate
+        results.push(`\n## Step 2: Capturing network requests from ${url}...`);
+        await browserCommand("network_start_capture", { filters: filters || [] });
+        await browserCommand("navigate", { url });
+
+        // Step 3: Wait for requests
+        const waitMs = Math.min((wait_seconds || 5), 15) * 1000;
+        await new Promise(r => setTimeout(r, waitMs));
+
+        // Step 4: Collect captured requests
+        const captureData = await browserCommand("network_list", { filter: undefined, limit: 200 });
+        const requests = captureData?.requests || [];
+
+        // Stop capture
+        await browserCommand("network_stop_capture");
+
+        if (requests.length === 0) {
+            results.push("❌ No network requests captured. The page may not have loaded, or try adding more specific filters.");
+            return { content: [{ type: "text", text: results.join("\n") }] };
+        }
+
+        results.push(`✅ Captured ${requests.length} requests.\n`);
+
+        // Step 5: Categorize requests
+        const apiRequests = requests.filter((r: any) => {
+            const u = (r.url || "").toLowerCase();
+            const isAsset = u.endsWith(".js") || u.endsWith(".css") || u.endsWith(".png") || u.endsWith(".jpg") ||
+                u.endsWith(".svg") || u.endsWith(".woff2") || u.endsWith(".woff") || u.endsWith(".ico") ||
+                u.includes("/static/") || u.includes("/assets/") || u.includes("/_next/static/");
+            return !isAsset;
+        });
+
+        const dataRequests = apiRequests.filter((r: any) => {
+            const u = (r.url || "").toLowerCase();
+            return u.includes("api") || u.includes("graphql") || u.includes("/v1/") || u.includes("/v2/") ||
+                u.includes("/v3/") || u.includes("json") || u.includes("rpc") || u.includes("query") ||
+                (r.method && r.method !== "GET");
+        });
+
+        results.push("## API Endpoints Discovered\n");
+        results.push("### High-confidence API calls:");
+        if (dataRequests.length > 0) {
+            for (const r of dataRequests.slice(0, 30)) {
+                results.push(`  [${r.id}] ${r.method || "GET"} ${r.status || "?"} ${r.url}`);
+            }
+        } else {
+            results.push("  (none detected — check 'Other requests' below)");
+        }
+
+        const otherRequests = apiRequests.filter((r: any) => !dataRequests.includes(r));
+        if (otherRequests.length > 0) {
+            results.push(`\n### Other requests (${otherRequests.length}):`);
+            for (const r of otherRequests.slice(0, 20)) {
+                results.push(`  [${r.id}] ${r.method || "GET"} ${r.status || "?"} ${r.url}`);
+            }
+        }
+
+        results.push(`\n## Next Steps`);
+        results.push(`1. Use network_request_detail(id) to inspect any interesting request's full headers and response`);
+        results.push(`2. Use authenticated_fetch() to replay the request and verify it works`);
+        results.push(`3. Use create_tool() to save it as a permanent tool`);
+        results.push(`\nAuth tokens stored under service "${domain}" — use helpers.credentials("${domain}") in create_tool code.`);
+
+        return { content: [{ type: "text", text: results.join("\n") }] };
+    }
+);
+
 server.tool(
     "list_custom_tools",
     "List all custom tools that have been created.",
@@ -2017,6 +2133,40 @@ function registerAllTools(s: McpServer) {
         registerDynamicTool(name, description, params_schema, code);
         await server.server.sendToolListChanged();
         return { content: [{ type: "text", text: `Tool "${name}" created and registered.` }] };
+    });
+    s.tool("discover_api", "Discover a website's internal API by navigating and capturing network requests.", {
+        url: z.string().describe("URL to navigate to"),
+        service: z.string().optional().describe("Service name for auth (auto-detected from URL if omitted)"),
+        filters: z.array(z.string()).optional().describe("URL substrings to capture"),
+        wait_seconds: z.number().optional().describe("Wait time for requests (default: 5s, max: 15s)"),
+    }, async ({ url, service, filters, wait_seconds }) => {
+        if (!isBridgeConnected()) return { content: [{ type: "text", text: "Browser extension not connected." }] };
+        const results: string[] = [];
+        const domain = service || new URL(url).hostname;
+        results.push(`## Extracting auth from ${domain}...`);
+        try {
+            const authResult = await browserCommand("extract_auth", { service: domain });
+            const creds: Record<string, string> = {};
+            for (const [key, value] of Object.entries(authResult)) { if (key === "service" || !value || typeof value !== "string") continue; creds[key] = value as string; try { db.storeCredential(domain, key, value as string); } catch {} }
+            if (Array.isArray(authResult.cookies) && authResult.cookies.length > 0) { const cookieHeader = authResult.cookies.map((c: any) => `${c.name}=${c.value}`).join("; "); creds._cookies = cookieHeader; try { db.storeCredential(domain, "_cookies", cookieHeader); } catch {} }
+            storeAuthInMemory(domain, creds);
+            results.push(`✅ Auth extracted. Tokens: ${Object.keys(creds).filter(k => !k.startsWith("_")).join(", ") || "cookies only"}`);
+        } catch (err: any) { results.push(`⚠️ Auth extraction failed: ${err.message}`); }
+        results.push(`\n## Capturing network requests from ${url}...`);
+        await browserCommand("network_start_capture", { filters: filters || [] });
+        await browserCommand("navigate", { url });
+        await new Promise(r => setTimeout(r, Math.min((wait_seconds || 5), 15) * 1000));
+        const captureData = await browserCommand("network_list", { filter: undefined, limit: 200 });
+        const requests = captureData?.requests || [];
+        await browserCommand("network_stop_capture");
+        if (requests.length === 0) { results.push("❌ No requests captured."); return { content: [{ type: "text", text: results.join("\n") }] }; }
+        results.push(`✅ Captured ${requests.length} requests.\n`);
+        const apiReqs = requests.filter((r: any) => { const u = (r.url || "").toLowerCase(); return !(u.endsWith(".js") || u.endsWith(".css") || u.endsWith(".png") || u.endsWith(".jpg") || u.endsWith(".svg") || u.endsWith(".woff2") || u.endsWith(".ico") || u.includes("/static/") || u.includes("/assets/")); });
+        const dataReqs = apiReqs.filter((r: any) => { const u = (r.url || "").toLowerCase(); return u.includes("api") || u.includes("graphql") || u.includes("/v1/") || u.includes("/v2/") || u.includes("rpc") || (r.method && r.method !== "GET"); });
+        results.push("### API Endpoints:");
+        for (const r of (dataReqs.length > 0 ? dataReqs : apiReqs).slice(0, 30)) { results.push(`  [${r.id}] ${r.method || "GET"} ${r.status || "?"} ${r.url}`); }
+        results.push(`\nAuth stored under "${domain}". Use network_request_detail(id) to inspect, then create_tool() to save.`);
+        return { content: [{ type: "text", text: results.join("\n") }] };
     });
     s.tool("list_custom_tools", "List all custom tools.", {}, async () => {
         const tools = db.getCustomTools();
