@@ -972,8 +972,8 @@ async function main() {
         if (state === "connected") {
             body = `<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><h1>WhatsApp Connected &#x2705;</h1></body></html>`;
         } else if (qr) {
-            const svg = await QRCode.toString(qr, { type: "svg", margin: 2 });
-            body = `<html><head><meta http-equiv="refresh" content="5"></head><body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><h2>Scan with WhatsApp</h2><p style="color:#aaa">Linked Devices &rarr; Link a Device</p><div style="background:white;padding:24px;border-radius:16px">${svg}</div><p style="color:#666;margin-top:16px">Auto-refreshing every 5s...</p></body></html>`;
+            const dataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 8, width: 300 });
+            body = `<html><head><meta http-equiv="refresh" content="5"></head><body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><h2>Scan with WhatsApp</h2><p style="color:#aaa">Linked Devices &rarr; Link a Device</p><div style="background:white;padding:24px;border-radius:16px"><img src="${dataUrl}" width="300" height="300" style="display:block"></div><p style="color:#666;margin-top:16px">Auto-refreshing every 5s...</p></body></html>`;
         } else {
             body = `<html><head><meta http-equiv="refresh" content="3"></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><h2>Connecting to WhatsApp... waiting for QR code</h2></body></html>`;
         }
