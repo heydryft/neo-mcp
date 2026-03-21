@@ -24,6 +24,7 @@ import * as github from "./integrations/github.js";
 import * as gcal from "./integrations/gcal.js";
 import * as notion from "./integrations/notion.js";
 import * as discord from "./integrations/discord.js";
+import * as gdrive from "./integrations/gdrive.js";
 import * as db from "./db.js";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge.js";
 
@@ -37,6 +38,7 @@ const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user
 - Discord: extract_auth("discord") once, then use discord_* tools (servers, channels, messages, DMs, reactions)
 - Slack: extract_auth("slack") once, then use slack_* tools
 - Google Calendar: gcal_connect (OAuth sign-in, then use gcal_* tools for events, scheduling, free/busy)
+- Google Drive: gdrive_connect (OAuth sign-in, then use gdrive_* tools for files, folders, search, read/write)
 - Gmail: gmail_connect (OAuth sign-in, supports multiple accounts via profile param)
 - WhatsApp: whatsapp_connect (QR code first time, auto-reconnects after)
 
@@ -137,6 +139,13 @@ async function getGCalAuth(profile?: string): Promise<gcal.GCalAuth> {
     const creds = getAuth(profileKey("gcal", profile));
     if (!creds.refresh_token) throw new Error(`Google Calendar not connected${profile ? ` for profile "${profile}"` : ""}. Use gcal_connect to authenticate.`);
     const access_token = await gcal.refreshAccessToken(creds.refresh_token, profile || "default");
+    return { access_token };
+}
+
+async function getGDriveAuth(profile?: string): Promise<gdrive.GDriveAuth> {
+    const creds = getAuth(profileKey("gdrive", profile));
+    if (!creds.refresh_token) throw new Error(`Google Drive not connected${profile ? ` for profile "${profile}"` : ""}. Use gdrive_connect to authenticate.`);
+    const access_token = await gdrive.refreshAccessToken(creds.refresh_token, profile || "default");
     return { access_token };
 }
 
@@ -720,6 +729,56 @@ server.tool("discord_members", "List members of a Discord server.", { guild_id: 
     async ({ guild_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.getGuildMembers(getDiscordAuth(profile), guild_id, limit || 100)) }] }));
 server.tool("discord_user", "Get a Discord user's profile.", { user_id: z.string(), ...profileParam },
     async ({ user_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getUserProfile(getDiscordAuth(profile), user_id)) }] }));
+
+// ── Google Drive ──────────────────────────────────────────────────────────────
+
+server.tool("gdrive_connect", "Connect a Google Drive account via OAuth.",
+    { profile: z.string().optional().describe("Account name (e.g. 'personal', 'work')") },
+    async ({ profile }) => {
+        const authUrl = `http://127.0.0.1:${httpPort}/gdrive/auth${profile ? `?profile=${profile}` : ""}`;
+        try { await browserCommand("navigate", { url: authUrl }); } catch {}
+        const storageKey = profileKey("gdrive", profile);
+        const deadline = Date.now() + 120000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2000));
+            const creds = memCredentials.get(storageKey);
+            if (creds?.refresh_token) {
+                return { content: [{ type: "text", text: `Google Drive connected${profile ? ` as "${profile}"` : ""}.` }] };
+            }
+        }
+        return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+    }
+);
+server.tool("gdrive_files", "List files in Google Drive.", {
+    query: z.string().optional().describe("Drive search query (e.g. \"name contains 'report'\")"),
+    folder_id: z.string().optional().describe("Folder ID to list contents of"),
+    page_size: z.number().optional(),
+    order_by: z.string().optional().describe("Sort order (e.g. 'modifiedTime desc')"),
+    ...profileParam,
+}, async ({ query, folder_id, page_size, order_by, profile }) => ({
+    content: [{ type: "text", text: json(await gdrive.listFiles(await getGDriveAuth(profile), { query, folderId: folder_id, pageSize: page_size, orderBy: order_by })) }],
+}));
+server.tool("gdrive_file", "Get file metadata.", { file_id: z.string(), ...profileParam },
+    async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFile(await getGDriveAuth(profile), file_id)) }] }));
+server.tool("gdrive_search", "Search files by name.", { query: z.string(), page_size: z.number().optional(), ...profileParam },
+    async ({ query, page_size, profile }) => ({ content: [{ type: "text", text: json(await gdrive.searchFiles(await getGDriveAuth(profile), query, page_size)) }] }));
+server.tool("gdrive_read", "Read file content (Google Docs→text, Sheets→CSV, others→download).", { file_id: z.string(), ...profileParam },
+    async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFileContent(await getGDriveAuth(profile), file_id)) }] }));
+server.tool("gdrive_create", "Create a file in Google Drive.", {
+    name: z.string(), content: z.string(), mime_type: z.string().optional(), folder_id: z.string().optional(), ...profileParam,
+}, async ({ name, content, mime_type, folder_id, profile }) => ({
+    content: [{ type: "text", text: json(await gdrive.createFile(await getGDriveAuth(profile), name, content, mime_type, folder_id)) }],
+}));
+server.tool("gdrive_update", "Update a file's content.", { file_id: z.string(), content: z.string(), mime_type: z.string().optional(), ...profileParam },
+    async ({ file_id, content, mime_type, profile }) => ({ content: [{ type: "text", text: json(await gdrive.updateFile(await getGDriveAuth(profile), file_id, content, mime_type)) }] }));
+server.tool("gdrive_delete", "Move a file to trash.", { file_id: z.string(), ...profileParam },
+    async ({ file_id, profile }) => { await gdrive.deleteFile(await getGDriveAuth(profile), file_id); return { content: [{ type: "text", text: "File moved to trash." }] }; });
+server.tool("gdrive_create_folder", "Create a folder.", { name: z.string(), parent_id: z.string().optional(), ...profileParam },
+    async ({ name, parent_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.createFolder(await getGDriveAuth(profile), name, parent_id)) }] }));
+server.tool("gdrive_shared_drives", "List shared drives.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.listSharedDrives(await getGDriveAuth(profile))) }] }));
+server.tool("gdrive_quota", "Get storage quota.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.getStorageQuota(await getGDriveAuth(profile))) }] }));
 
 // ── Collections (agent-designed data storage) ────────────────────────────────
 
@@ -2325,6 +2384,32 @@ async function main() {
         }
     });
 
+    // ── Google Drive OAuth ────────────────────────────────────────────────
+    app.get("/gdrive/auth", (req: any, res: any) => {
+        const profile = req.query.profile || undefined;
+        const redirectUri = `http://localhost:${httpPort}/gdrive/callback`;
+        const url = gdrive.getOAuthUrl(redirectUri, profile);
+        res.redirect(url);
+    });
+
+    app.get("/gdrive/callback", async (req: any, res: any) => {
+        const code = req.query.code as string;
+        const profile = (req.query.state as string) || "default";
+        if (!code) { res.status(400).send("Missing authorization code."); return; }
+        try {
+            const redirectUri = `http://localhost:${httpPort}/gdrive/callback`;
+            const tokens = await gdrive.exchangeCode(code, redirectUri);
+            const storageKey = profileKey("gdrive", profile === "default" ? undefined : profile);
+            const creds: Record<string, string> = { refresh_token: tokens.refresh_token };
+            try { db.storeCredential(storageKey, "refresh_token", tokens.refresh_token); } catch {}
+            storeAuthInMemory(storageKey, creds);
+            const label = profile !== "default" ? ` (profile: ${profile})` : "";
+            res.send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Google Drive Connected &#x2705;</h1><p style="color:#aaa">${label}</p><p style="color:#666">You can close this tab.</p></div></body></html>`);
+        } catch (err: any) {
+            res.status(500).send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Auth Failed</h1><p style="color:#f66">${err.message}</p></div></body></html>`);
+        }
+    });
+
     // ── WhatsApp QR page ──────────────────────────────────────────────────
     app.get("/whatsapp-qr", async (req, res) => {
         const wa = await import("./integrations/whatsapp.js");
@@ -2638,6 +2723,37 @@ function registerAllTools(s: McpServer) {
         async ({ guild_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.getGuildMembers(getDiscordAuth(profile), guild_id, limit || 100)) }] }));
     s.tool("discord_user", "Get a Discord user's profile.", { user_id: z.string(), ...profileParam },
         async ({ user_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getUserProfile(getDiscordAuth(profile), user_id)) }] }));
+
+    // Google Drive
+    s.tool("gdrive_connect", "Connect a Google Drive account via OAuth.", { profile: z.string().optional() },
+        async ({ profile }) => {
+            const authUrl = `http://127.0.0.1:${httpPort}/gdrive/auth${profile ? `?profile=${profile}` : ""}`;
+            try { await browserCommand("navigate", { url: authUrl }); } catch {}
+            const storageKey = profileKey("gdrive", profile);
+            const deadline = Date.now() + 120000;
+            while (Date.now() < deadline) { await new Promise(r => setTimeout(r, 2000)); const c = memCredentials.get(storageKey); if (c?.refresh_token) return { content: [{ type: "text", text: `Google Drive connected${profile ? ` as "${profile}"` : ""}.` }] }; }
+            return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+        });
+    s.tool("gdrive_files", "List files in Google Drive.", { query: z.string().optional(), folder_id: z.string().optional(), page_size: z.number().optional(), order_by: z.string().optional(), ...profileParam },
+        async ({ query, folder_id, page_size, order_by, profile }) => ({ content: [{ type: "text", text: json(await gdrive.listFiles(await getGDriveAuth(profile), { query, folderId: folder_id, pageSize: page_size, orderBy: order_by })) }] }));
+    s.tool("gdrive_file", "Get file metadata.", { file_id: z.string(), ...profileParam },
+        async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFile(await getGDriveAuth(profile), file_id)) }] }));
+    s.tool("gdrive_search", "Search files by name.", { query: z.string(), page_size: z.number().optional(), ...profileParam },
+        async ({ query, page_size, profile }) => ({ content: [{ type: "text", text: json(await gdrive.searchFiles(await getGDriveAuth(profile), query, page_size)) }] }));
+    s.tool("gdrive_read", "Read file content.", { file_id: z.string(), ...profileParam },
+        async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFileContent(await getGDriveAuth(profile), file_id)) }] }));
+    s.tool("gdrive_create", "Create a file.", { name: z.string(), content: z.string(), mime_type: z.string().optional(), folder_id: z.string().optional(), ...profileParam },
+        async ({ name, content, mime_type, folder_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.createFile(await getGDriveAuth(profile), name, content, mime_type, folder_id)) }] }));
+    s.tool("gdrive_update", "Update a file's content.", { file_id: z.string(), content: z.string(), mime_type: z.string().optional(), ...profileParam },
+        async ({ file_id, content, mime_type, profile }) => ({ content: [{ type: "text", text: json(await gdrive.updateFile(await getGDriveAuth(profile), file_id, content, mime_type)) }] }));
+    s.tool("gdrive_delete", "Move a file to trash.", { file_id: z.string(), ...profileParam },
+        async ({ file_id, profile }) => { await gdrive.deleteFile(await getGDriveAuth(profile), file_id); return { content: [{ type: "text", text: "File trashed." }] }; });
+    s.tool("gdrive_create_folder", "Create a folder.", { name: z.string(), parent_id: z.string().optional(), ...profileParam },
+        async ({ name, parent_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.createFolder(await getGDriveAuth(profile), name, parent_id)) }] }));
+    s.tool("gdrive_shared_drives", "List shared drives.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.listSharedDrives(await getGDriveAuth(profile))) }] }));
+    s.tool("gdrive_quota", "Get storage quota.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.getStorageQuota(await getGDriveAuth(profile))) }] }));
 
     // Slack
     s.tool("slack_channels", "List Slack channels.", { ...profileParam },
