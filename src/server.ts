@@ -31,7 +31,7 @@ const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user
 ## Built-in services
 - LinkedIn: extract_auth("linkedin") once, then use linkedin_* tools
 - Twitter/X: extract_auth("twitter") once, then use twitter_* tools
-- GitHub: extract_auth("github") once, then use github_* tools (repos, issues, PRs, actions, gists, search)
+- GitHub: Auto-detects gh CLI token, or use store_credential("github", "token", "ghp_...") with a PAT. Then use github_* tools (repos, issues, PRs, actions, gists, search)
 - Notion: extract_auth("notion") once, then use notion_* tools (pages, databases, search, create/edit)
 - Slack: extract_auth("slack") once, then use slack_* tools
 - Google Calendar: gcal_connect (OAuth sign-in, then use gcal_* tools for events, scheduling, free/busy)
@@ -140,8 +140,19 @@ async function getGCalAuth(profile?: string): Promise<gcal.GCalAuth> {
 
 function getGitHubAuth(profile?: string): github.GitHubAuth {
     const creds = getAuth(profileKey("github", profile));
-    // GitHub can use a PAT token or cookies from browser session
-    const token = creds.token || creds.access_token || creds.pat || "";
+    let token = creds.token || creds.access_token || creds.pat || "";
+    // If no token stored, try extracting from gh CLI
+    if (!token) {
+        try {
+            const result = require("child_process").execSync("gh auth token 2>/dev/null", { encoding: "utf-8", timeout: 5000 }).trim();
+            if (result && result.startsWith("gh")) {
+                token = result;
+                // Store for future use
+                try { db.storeCredential(profileKey("github", profile), "token", token); } catch {}
+            }
+        } catch {}
+    }
+    if (!token) throw new Error('GitHub requires a Personal Access Token. Either: (1) Run `gh auth login` in terminal, or (2) Use store_credential("github", "token", "ghp_YOUR_TOKEN") with a PAT from https://github.com/settings/tokens');
     return { token, _cookies: creds._cookies };
 }
 

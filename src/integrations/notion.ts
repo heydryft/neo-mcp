@@ -113,25 +113,50 @@ export async function getSpaces(auth: NotionAuth): Promise<any[]> {
 // ── Search ───────────────────────────────────────────────────────────────────
 
 export async function search(auth: NotionAuth, query: string, options: { limit?: number; spaceId?: string; type?: string } = {}): Promise<any[]> {
+    // Auto-detect spaceId if not provided
+    let spaceId = options.spaceId;
+    if (!spaceId) {
+        try {
+            const spaces = await getSpaces(auth);
+            if (spaces.length > 0) spaceId = spaces[0].id;
+        } catch {}
+    }
+
     const body: any = {
         type: "BlocksInSpace",
         query,
         limit: options.limit || 20,
+        source: "quick_find",
         filters: {
             isDeletedOnly: false,
-            excludeTemplates: true,
-            navigableBlockContentOnly: true,
+            excludeTemplates: false,
+            navigableBlockContentOnly: false,
             requireEditPermissions: false,
+            includePublicPagesWithoutExplicitAccess: false,
+            ancestors: [],
+            createdBy: [],
+            editedBy: [],
+            lastEditedTime: {},
+            createdTime: {},
+            inTeams: [],
+            excludeSurrogateCollections: false,
+            excludedParentCollectionIds: [],
         },
         sort: { field: "relevance" },
+        peopleBlocksToInclude: "all",
+        excludedBlockIds: [],
+        searchSessionFlowNumber: 1,
+        searchSessionId: crypto.randomUUID(),
+        recentPagesForBoosting: [],
+        ignoresHighlight: false,
     };
 
-    if (options.spaceId) {
-        body.spaceId = options.spaceId;
+    if (spaceId) {
+        body.spaceId = spaceId;
     }
 
     if (options.type) {
-        body.filters.type = options.type; // "page", "collection", etc.
+        body.filters.type = options.type;
     }
 
     const data = await notionApi(auth, "search", body);
@@ -561,16 +586,27 @@ export async function queryDatabase(
 // ── Recently visited ─────────────────────────────────────────────────────────
 
 export async function getRecentPages(auth: NotionAuth, limit = 20): Promise<any[]> {
-    const data = await notionApi(auth, "getRecentPageVisits", {
-        limit,
+    // Get the user's space to query recent pages
+    let spaceId: string | undefined;
+    try {
+        const spaces = await getSpaces(auth);
+        if (spaces.length > 0) spaceId = spaces[0].id;
+    } catch {}
+
+    if (!spaceId) throw new Error("Could not determine workspace. Make sure you're logged into Notion.");
+
+    const data = await notionApi(auth, "getUserSharedPagesInSpace", {
+        spaceId,
+        includeDeleted: false,
     });
 
     const pages: any[] = [];
-    for (const visit of data.pages || []) {
+    const ids = data.pages || data.pageIds || [];
+    for (const id of ids.slice(0, limit)) {
+        const pageId = typeof id === "string" ? id : id.id;
         pages.push({
-            id: visit.id,
-            visited_at: visit.visitedAt ? new Date(visit.visitedAt).toISOString() : null,
-            url: `https://www.notion.so/${(visit.id || "").replace(/-/g, "")}`,
+            id: pageId,
+            url: `https://www.notion.so/${(pageId || "").replace(/-/g, "")}`,
         });
     }
     return pages;
