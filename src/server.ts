@@ -352,6 +352,16 @@ server.tool(
 );
 
 server.tool(
+    "linkedin_profile_posts",
+    "Get a LinkedIn user's posts by their vanity name (URL slug).",
+    { vanity_name: z.string().describe("LinkedIn vanity name (e.g. 'bill-gates')"), count: z.number().optional().describe("Number of posts (default 20)"), ...profileParam },
+    async ({ vanity_name, count, profile }) => {
+        const posts = await linkedin.getProfilePosts(getLinkedInAuth(profile), vanity_name, count || 20);
+        return { content: [{ type: "text", text: json(posts) }] };
+    }
+);
+
+server.tool(
     "linkedin_feed",
     "Get your LinkedIn feed.",
     { count: z.number().optional().describe("Number of posts (default 20)"), ...profileParam },
@@ -2844,6 +2854,8 @@ function registerAllTools(s: McpServer) {
         async ({ vanity_name, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getProfile(getLinkedInAuth(profile), vanity_name)) }] }));
     s.tool("linkedin_my_posts", "Get your own LinkedIn posts with engagement metrics.", { count: z.number().optional(), ...profileParam },
         async ({ count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getMyPosts(getLinkedInAuth(profile), count || 20)) }] }));
+    s.tool("linkedin_profile_posts", "Get a LinkedIn user's posts by vanity name.", { vanity_name: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ vanity_name, count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getProfilePosts(getLinkedInAuth(profile), vanity_name, count || 20)) }] }));
     s.tool("linkedin_feed", "Get your LinkedIn feed.", { count: z.number().optional(), ...profileParam },
         async ({ count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getFeed(getLinkedInAuth(profile), count || 20)) }] }));
     s.tool("linkedin_post", "Create a LinkedIn post.", { text: z.string(), ...profileParam },

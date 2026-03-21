@@ -91,8 +91,8 @@ async function linkedinApi<T = any>(
     return response.json() as Promise<T>;
 }
 
-/** Get the authenticated user's identity (URNs + miniProfile ID) */
-async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn: string; miniProfileId: string }> {
+/** Get the authenticated user's identity (URNs + miniProfile ID + fsd_profile URN) */
+async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn: string; miniProfileId: string; fsdProfileUrn: string }> {
     const data = await linkedinApi(auth, `/me`);
     const profile = data.miniProfile || data;
 
@@ -109,10 +109,22 @@ async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn
     // Fallback: plainId field (some response formats provide this directly)
     if (!miniProfileId) miniProfileId = data.plainId || profile.plainId || "";
 
+    // Build fsd_profile URN — needed for profileUpdatesV2, posting, etc.
+    const entityUrn = profile.entityUrn || profile.objectUrn || "";
+    let fsdProfileUrn = "";
+    if (entityUrn.includes("fsd_profile")) {
+        fsdProfileUrn = entityUrn;
+    } else if (entityUrn.includes("fs_miniProfile")) {
+        fsdProfileUrn = entityUrn.replace("fs_miniProfile", "fsd_profile");
+    } else if (miniProfileId) {
+        fsdProfileUrn = `urn:li:fsd_profile:${miniProfileId}`;
+    }
+
     return {
         objectUrn: profile.objectUrn || "",
-        entityUrn: profile.entityUrn || profile.objectUrn || "",
+        entityUrn,
         miniProfileId,
+        fsdProfileUrn,
     };
 }
 
@@ -151,38 +163,106 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
 
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    let memberUrn = "";
-    try {
-        const me = await getMe(auth);
-        memberUrn = me.objectUrn || me.entityUrn || "";
-    } catch {}
+    const me = await getMe(auth);
+    if (!me.fsdProfileUrn) throw new Error("Could not determine fsd_profile URN for current user");
 
-    // GraphQL feed with RECENCY sort to surface own posts first; fetch extra to allow filtering
-    const data = await linkedinApi(auth, `/graphql`, {
+    return fetchProfileUpdates(auth, me.fsdProfileUrn, count);
+}
+
+/** Get a specific user's posts by vanity name */
+export async function getProfilePosts(auth: LinkedInAuth, vanityName: string, count = 20): Promise<any[]> {
+    // Resolve vanity name to fsd_profile URN via the dash profiles endpoint
+    const data = await linkedinApi(auth, `/identity/dash/profiles`, {
         params: {
-            queryId: "voyagerFeedDashMainFeed.923020905727c01516495a0ac90bb475",
-            variables: `(start:0,count:${count * 3},sortOrder:RECENCY)`,
+            q: "memberIdentity",
+            memberIdentity: vanityName,
+            decorationId: "com.linkedin.voyager.dash.deco.identity.profile.FullProfile-91",
+        },
+    });
+    const included: any[] = data.included || [];
+    const profileEntity = included.find((e: any) =>
+        e.$type?.includes("Profile") && e.entityUrn?.includes("fsd_profile")
+    );
+    if (!profileEntity?.entityUrn) throw new Error(`Could not resolve fsd_profile URN for "${vanityName}"`);
+
+    return fetchProfileUpdates(auth, profileEntity.entityUrn, count);
+}
+
+/** Fetch posts for a given fsd_profile URN via /identity/profileUpdatesV2 */
+async function fetchProfileUpdates(auth: LinkedInAuth, profileUrn: string, count: number): Promise<any[]> {
+    const data = await linkedinApi(auth, `/identity/profileUpdatesV2`, {
+        params: {
+            count: String(Math.min(count, 100)),
+            start: "0",
+            q: "memberShareFeed",
+            moduleKey: "member-shares:phone",
+            includeLongTermHistory: "true",
+            profileUrn: profileUrn,
         },
     });
 
-    const posts = extractGraphQLFeedPosts(data, count * 3);
-    if (memberUrn) {
-        const mine = posts.filter(p => p.authorUrn && p.authorUrn.includes(memberUrn));
-        if (mine.length > 0) return mine.slice(0, count);
+    if (data?.status && data.status !== 200) {
+        throw new Error(`LinkedIn profileUpdatesV2 failed: ${data.status} ${data.message || ""}`);
     }
-    return posts.slice(0, count);
+
+    const elements: any[] = data?.elements || [];
+    return extractProfileUpdatePosts(elements, count);
+}
+
+/** Parse posts from /identity/profileUpdatesV2 response elements */
+function extractProfileUpdatePosts(elements: any[], max: number): any[] {
+    const posts: any[] = [];
+    for (const item of elements) {
+        if (posts.length >= max) break;
+
+        const commentary = item.commentary?.text?.text
+            || item.commentary?.text
+            || "";
+        if (!commentary) continue;
+
+        // Actor info is usually inline in profileUpdatesV2 responses
+        const actor = item.actor || {};
+        const authorName = actor.name?.text
+            || `${actor.firstName?.text || ""} ${actor.lastName?.text || ""}`.trim()
+            || "";
+
+        // Social counts
+        const socialDetail = item.socialDetail || item.threadSocialDetail || {};
+        const socialCounts = socialDetail.totalSocialActivityCounts || {};
+
+        // Post URN
+        const postUrn = item.updateMetadata?.urn
+            || item.urn
+            || item.entityUrn
+            || "";
+
+        posts.push({
+            text: commentary.slice(0, 1000),
+            author: authorName || undefined,
+            authorUrn: actor.urn || undefined,
+            created: item.createdAt ? new Date(item.createdAt).toISOString() : null,
+            likes: socialCounts.numLikes || 0,
+            comments: socialCounts.numComments || 0,
+            reposts: socialCounts.numShares || 0,
+            impressions: socialCounts.numImpressions || null,
+            urn: postUrn,
+        });
+    }
+    return posts;
 }
 
 /** Get the user's feed */
 export async function getFeed(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    const data = await linkedinApi(auth, `/graphql`, {
+    const data = await linkedinApi(auth, `/feed/updatesV2`, {
         params: {
-            queryId: "voyagerFeedDashMainFeed.923020905727c01516495a0ac90bb475",
-            variables: `(start:0,count:${count},sortOrder:RELEVANCE)`,
+            count: String(Math.min(count, 100)),
+            start: "0",
+            q: "chronFeed",
         },
+        headers: { "Accept": "application/vnd.linkedin.normalized+json+2.1" },
     });
 
-    return extractGraphQLFeedPosts(data, count);
+    return extractPosts(data, count);
 }
 
 function extractPosts(data: any, max: number): any[] {
@@ -276,117 +356,32 @@ function extractPosts(data: any, max: number): any[] {
     return posts;
 }
 
-/** Parse the GraphQL feed response (voyagerFeedDashMainFeed GraphQL API) */
-function extractGraphQLFeedPosts(data: any, max: number): any[] {
-    // LinkedIn GraphQL normalized format:
-    //   data.data.feedDashMainFeedByMainFeed.*elements = array of URN strings
-    //   data.data[urn] = the actual FeedComponent entity
-    //   included = referenced profiles, companies, etc.
-    const graphData: Record<string, any> = data?.data?.data || data?.data || {};
-    const included: any[] = data?.included || [];
-
-    // Build URN → entity lookup from URN-keyed top-level keys in graphData
-    const byUrn = new Map<string, any>();
-    for (const [key, value] of Object.entries(graphData)) {
-        if (key.startsWith("urn:")) byUrn.set(key, value);
+/** Convert a URN from /me into a urn:li:person:... author URN for posting */
+function toPersonUrn(me: { objectUrn: string; entityUrn: string; fsdProfileUrn: string }): string {
+    // objectUrn is typically urn:li:member:12345 — convert to person
+    const urn = me.objectUrn || me.entityUrn || "";
+    if (urn.includes(":member:")) return urn.replace(":member:", ":person:");
+    if (urn.includes(":person:")) return urn;
+    // fsd_profile contains the profile ID (ACoAAA...) — use that
+    if (me.fsdProfileUrn) {
+        const id = me.fsdProfileUrn.split(":").pop() || "";
+        if (id) return `urn:li:person:${id}`;
     }
-    for (const item of included) {
-        const urn = item.entityUrn || item.urn;
-        if (urn) byUrn.set(urn, item);
-    }
-
-    // Get the ordered list of feed component URNs (or direct element objects)
-    const feedObj: any = graphData["feedDashMainFeedByMainFeed"] || {};
-    const rawElements: any[] = feedObj["*elements"] || feedObj.elements || [];
-
-    const posts: any[] = [];
-
-    for (const raw of rawElements) {
-        if (posts.length >= max) break;
-
-        // Resolve: may be a URN string or an inline object
-        const component: any = typeof raw === "string" ? (byUrn.get(raw) || {}) : raw;
-        if (!component || Object.keys(component).length === 0) continue;
-
-        // Extract text content
-        const commentary =
-            component.commentary?.text?.text ||
-            component.commentary?.text ||
-            component.content?.article?.description?.text ||
-            "";
-        if (!commentary) continue;
-
-        // Extract actor / author
-        const actor: any = component.actor || {};
-        const authorName =
-            actor.name?.text ||
-            actor.title?.text ||
-            `${actor.firstName?.text || ""} ${actor.lastName?.text || ""}`.trim() ||
-            "";
-        const authorUrn = actor.urn || actor["*actor"] || "";
-
-        // Social counts — may be embedded or referenced in included entities
-        const socialDetail: any = component.socialDetail || component.threadSocialDetail || {};
-        let socialCounts: any = socialDetail.totalSocialActivityCounts || {};
-
-        // If counts are zero, look up from included fsd_socialActivityCounts entities
-        if (!socialCounts.numLikes && !socialCounts.numComments) {
-            const activityUrn = component.updateMetadata?.backendUrn || "";
-            if (activityUrn) {
-                const countsUrn = `urn:li:fsd_socialActivityCounts:${activityUrn}`;
-                const countsEntity = byUrn.get(countsUrn);
-                if (countsEntity) socialCounts = countsEntity;
-            }
-        }
-
-        // Post URN — prefer the activity URN embedded in the feed component
-        const postUrn =
-            component.updateMetadata?.urn ||
-            component.entityUrn ||
-            (typeof raw === "string" ? raw : "");
-
-        posts.push({
-            text: commentary.slice(0, 1000),
-            author: authorName || undefined,
-            authorUrn: authorUrn || undefined,
-            created: component.createdAt ? new Date(component.createdAt).toISOString() : null,
-            likes: socialCounts.numLikes || 0,
-            comments: socialCounts.numComments || 0,
-            reposts: socialCounts.numShares || 0,
-            impressions: socialCounts.numImpressions || null,
-            urn: postUrn,
-        });
-    }
-
-    return posts;
+    // Last resort: extract trailing ID
+    const id = urn.split(":").pop() || "";
+    if (id) return `urn:li:person:${id}`;
+    return "";
 }
 
 /** Create a text post */
 export async function createPost(auth: LinkedInAuth, text: string): Promise<any> {
-    // Get author URN (needed for UGC post format)
-    let authorUrn = "";
-    try {
-        const me = await getMe(auth);
-        // LinkedIn returns different URN formats depending on context:
-        //   urn:li:member:12345 → need urn:li:person:12345
-        //   urn:li:fsd_profile:ACoAAA... → need urn:li:person:ACoAAA... (extract the ID)
-        const urn = me.objectUrn || me.entityUrn || "";
-        if (urn.includes("urn:li:member:")) {
-            authorUrn = urn.replace("urn:li:member:", "urn:li:person:");
-        } else if (urn.includes("urn:li:fsd_profile:")) {
-            authorUrn = urn.replace("urn:li:fsd_profile:", "urn:li:person:");
-        } else if (urn.includes("urn:li:person:")) {
-            authorUrn = urn;
-        } else if (urn) {
-            // Unknown format — try extracting the ID and using person URN
-            const id = urn.split(":").pop() || "";
-            authorUrn = `urn:li:person:${id}`;
-        }
-    } catch {}
+    const me = await getMe(auth);
+    const authorUrn = toPersonUrn(me);
+    if (!authorUrn) throw new Error("Could not determine author URN for posting");
 
-    // Use normShares — the replacement for the deprecated /contentcreation/shares endpoint
     const body: any = {
         visibleToGuest: true,
+        author: authorUrn,
         commentary: {
             text,
             attributes: [],
@@ -396,7 +391,6 @@ export async function createPost(auth: LinkedInAuth, text: string): Promise<any>
             thirdPartyDistributionChannels: [],
         },
     };
-    if (authorUrn) body.author = authorUrn;
 
     const data = await linkedinApi(auth, `/contentcreation/normShares`, {
         method: "POST",
@@ -734,22 +728,18 @@ export async function sendMessage(auth: LinkedInAuth, recipientUrn: string, body
 
 /** React to a post (like, celebrate, support, love, insightful, funny) */
 export async function reactToPost(auth: LinkedInAuth, postUrn: string, reactionType: string = "LIKE"): Promise<any> {
-    // LinkedIn reactions need an activity URN. Convert if we got an update/ugcPost URN.
-    // urn:li:ugcPost:123 → urn:li:activity:123
-    // urn:li:share:123 → urn:li:activity:123
-    let activityUrn = postUrn;
-    if (postUrn.includes(":ugcPost:")) {
-        activityUrn = postUrn.replace(":ugcPost:", ":activity:");
-    } else if (postUrn.includes(":share:")) {
-        activityUrn = postUrn.replace(":share:", ":activity:");
-    }
+    // Extract activity ID from various URN formats
+    let activityId = postUrn;
+    if (postUrn.includes(":ugcPost:")) activityId = postUrn.split(":ugcPost:")[1];
+    else if (postUrn.includes(":share:")) activityId = postUrn.split(":share:")[1];
+    else if (postUrn.includes(":activity:")) activityId = postUrn.split(":activity:")[1];
 
-    await linkedinApi(auth, `/feed/normReactions`, {
+    const activityUrn = `urn:li:activity:${activityId}`;
+
+    await linkedinApi(auth, `/voyagerSocialDashReactions`, {
         method: "POST",
-        body: {
-            reactionType: reactionType.toUpperCase(),
-            threadUrn: activityUrn,
-        },
+        params: { threadUrn: activityUrn },
+        body: { reactionType: reactionType.toUpperCase() },
     });
 
     return { reacted: true, type: reactionType.toUpperCase(), postUrn: activityUrn };
@@ -757,24 +747,18 @@ export async function reactToPost(auth: LinkedInAuth, postUrn: string, reactionT
 
 /** Comment on a post */
 export async function commentOnPost(auth: LinkedInAuth, postUrn: string, text: string): Promise<any> {
-    let authorUrn = "";
-    try {
-        const me = await getMe(auth);
-        const urn = me.objectUrn || me.entityUrn || "";
-        if (urn.includes("urn:li:member:")) authorUrn = urn.replace("urn:li:member:", "urn:li:person:");
-        else if (urn.includes("urn:li:fsd_profile:")) authorUrn = urn.replace("urn:li:fsd_profile:", "urn:li:person:");
-        else if (urn.includes("urn:li:person:")) authorUrn = urn;
-        else if (urn) authorUrn = `urn:li:person:${urn.split(":").pop()}`;
-    } catch {}
+    const me = await getMe(auth);
+    const authorUrn = toPersonUrn(me);
+    if (!authorUrn) throw new Error("Could not determine author URN for commenting");
 
     const body: any = {
         threadUrn: postUrn,
+        author: authorUrn,
         commentary: {
             text,
             attributes: [],
         },
     };
-    if (authorUrn) body.author = authorUrn;
 
     const data = await linkedinApi(auth, `/feed/normComments`, {
         method: "POST",
@@ -784,32 +768,31 @@ export async function commentOnPost(auth: LinkedInAuth, postUrn: string, text: s
     return { commented: true, urn: data.urn || data.value?.urn || null };
 }
 
-/** Get comments on a post via GraphQL */
+/** Get comments on a post */
 export async function getPostComments(auth: LinkedInAuth, postUrn: string, count = 20): Promise<any[]> {
-    // Extract the activity ID from various URN formats
-    let activityUrn = postUrn;
-    if (postUrn.includes(":ugcPost:")) activityUrn = postUrn.replace(":ugcPost:", ":activity:");
-    else if (postUrn.includes(":share:")) activityUrn = postUrn.replace(":share:", ":activity:");
-    // Strip fsd_update wrapper if present: urn:li:fsd_update:(urn:li:activity:XXX,...) → urn:li:activity:XXX
-    const activityMatch = activityUrn.match(/urn:li:activity:\d+/);
-    if (activityMatch) activityUrn = activityMatch[0];
+    // Extract activity ID from various URN formats
+    let activityId = postUrn;
+    if (postUrn.includes(":ugcPost:")) activityId = postUrn.split(":ugcPost:")[1];
+    else if (postUrn.includes(":share:")) activityId = postUrn.split(":share:")[1];
+    else if (postUrn.includes(":activity:")) activityId = postUrn.split(":activity:")[1];
+    // Strip fsd_update wrapper: urn:li:fsd_update:(urn:li:activity:XXX,...) → XXX
+    const activityMatch = activityId.match(/\d+/);
+    if (activityMatch) activityId = activityMatch[0];
 
-    // Build the socialDetailUrn — LinkedIn uses (activity,activity,highlightedReply:-) format.
-    // encodeURIComponent skips parens, so we encode those manually too.
-    const encodedSocialDetail = encodeURIComponent(
-        `urn:li:fsd_socialDetail:(${activityUrn},${activityUrn},urn:li:highlightedReply:-)`
-    ).replace(/\(/g, "%28").replace(/\)/g, "%29");
-
-    const data = await linkedinApi(auth, `/graphql`, {
+    const data = await linkedinApi(auth, `/feed/comments`, {
         params: {
-            variables: `(count:${count},numReplies:0,socialDetailUrn:${encodedSocialDetail},sortOrder:RELEVANCE,start:0)`,
-            queryId: "voyagerSocialDashComments.afec6d88d7810d45548797a8dac4fb87",
+            count: String(Math.min(count, 100)),
+            start: "0",
+            q: "comments",
+            sortOrder: "RELEVANCE",
+            updateId: `activity:${activityId}`,
         },
     });
 
+    const elements: any[] = data?.elements || [];
     const included: any[] = data?.included || [];
 
-    // Build URN map
+    // Build URN map from included entities
     const byUrn = new Map<string, any>();
     for (const item of included) {
         const urn = item.entityUrn;
@@ -817,11 +800,8 @@ export async function getPostComments(auth: LinkedInAuth, postUrn: string, count
     }
 
     const comments: any[] = [];
-    for (const item of included) {
+    for (const item of elements) {
         if (comments.length >= count) break;
-        // Comment entities have commentary field
-        const isComment = item.$type?.includes("Comment") || item.commentary;
-        if (!isComment) continue;
 
         const commentText = item.commentary?.text?.text
             || item.commentary?.text
@@ -829,7 +809,7 @@ export async function getPostComments(auth: LinkedInAuth, postUrn: string, count
             || "";
         if (!commentText) continue;
 
-        // Resolve commenter — may be inline object or URN reference
+        // Resolve commenter
         const commenterInline = typeof item.commenter === "object" ? item.commenter : null;
         const commenterRef = item["*commenter"];
         const commenter = commenterInline || (commenterRef ? byUrn.get(commenterRef) : null);
