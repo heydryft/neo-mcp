@@ -118,9 +118,9 @@ function getTwitterAuth(profile?: string): twitter.TwitterAuth {
 
 function getSlackAuth(profile?: string): slack.SlackAuth {
     const creds = getAuth(profileKey("slack", profile));
-    const token = creds.token || creds.xoxc || creds.xoxp || creds.xoxb;
-    if (!token) throw new Error(`Missing Slack token. Run extract_auth for slack${profile ? ` (profile: ${profile})` : ""}.`);
-    return { token, cookie: creds.d || creds.cookie };
+    const token = creds.xoxc_token || creds.token || creds.xoxc || creds.xoxp || creds.xoxb;
+    if (!token) throw new Error(`Missing Slack token (have keys: ${Object.keys(creds).join(", ")}). Run extract_auth for slack${profile ? ` (profile: ${profile})` : ""}.`);
+    return { token, cookie: creds.d_cookie || creds.d || creds.cookie };
 }
 
 
