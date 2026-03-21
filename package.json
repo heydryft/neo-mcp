@@ -21,6 +21,7 @@
     "postinstall": "node scripts/postinstall.cjs",
     "start": "node dist/server.js",
     "start:http": "node dist/server.js --http-only",
+    "mcp": "npm install && npm run build && npm run start:http",
     "dev": "tsc && node dist/server.js"
   },
   "repository": {

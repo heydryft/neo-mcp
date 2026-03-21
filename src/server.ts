@@ -1156,6 +1156,16 @@ function registerAllTools(s: McpServer) {
         async ({ name }) => { const tool = db.getCustomTool(name); return { content: [{ type: "text", text: tool ? `// ${tool.name}: ${tool.description}\n// params: ${tool.params_schema}\n\n${tool.code}` : `Tool "${name}" not found.` }] }; });
     s.tool("delete_tool", "Delete a custom tool.", { name: z.string() },
         async ({ name }) => { const deleted = db.deleteCustomTool(name); if (deleted) await server.server.sendToolListChanged(); return { content: [{ type: "text", text: deleted ? `Deleted "${name}".` : `Tool "${name}" not found.` }] }; });
+
+    // WhatsApp
+    s.tool("whatsapp_connect", "Connect to WhatsApp. Returns a QR code to scan on first use. Auto-reconnects after that.", {},
+        async () => { const wa = await import("./integrations/whatsapp.js"); await wa.connect(); return { content: [{ type: "text", text: "WhatsApp connected." }] }; });
+    s.tool("whatsapp_chats", "List WhatsApp chats with last message and unread count.", { limit: z.number().optional() },
+        async ({ limit }) => { const wa = await import("./integrations/whatsapp.js"); const chats = await wa.getChats(limit || 30); return { content: [{ type: "text", text: json(chats) }] }; });
+    s.tool("whatsapp_read", "Read messages from a WhatsApp chat. Pass chat ID, phone number, or contact name.", { chat: z.string().describe("Chat ID, phone number (e.g. +919876543210), or contact name"), limit: z.number().optional() },
+        async ({ chat, limit }) => { const wa = await import("./integrations/whatsapp.js"); const messages = await wa.readMessages(chat, limit || 30); return { content: [{ type: "text", text: json(messages) }] }; });
+    s.tool("whatsapp_send", "Send a WhatsApp message.", { to: z.string().describe("Phone number, contact name, or chat ID"), text: z.string() },
+        async ({ to, text }) => { const wa = await import("./integrations/whatsapp.js"); const result = await wa.sendMessage(to, text); return { content: [{ type: "text", text: json(result) }] }; });
 }
 
 main().catch(console.error);

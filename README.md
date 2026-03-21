@@ -46,9 +46,7 @@ The HTTP server runs on your machine and exposes an MCP endpoint that any client
 
 ```bash
 cd neo-mcp
-npm install
-npm run build
-npm run start:http
+npm run mcp
 ```
 
 The server starts at `http://localhost:3100/mcp`.
@@ -56,7 +54,7 @@ The server starts at `http://localhost:3100/mcp`.
 To use a different port:
 
 ```bash
-NEO_HTTP_PORT=4000 npm run start:http
+NEO_HTTP_PORT=4000 npm run mcp
 ```
 
 ### 2. Connect your client
