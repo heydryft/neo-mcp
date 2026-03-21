@@ -32,9 +32,9 @@ const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user
 - LinkedIn: extract_auth("linkedin") once, then use linkedin_* tools
 - Twitter/X: extract_auth("twitter") once, then use twitter_* tools
 - GitHub: extract_auth("github") once, then use github_* tools (repos, issues, PRs, actions, gists, search)
-- Google Calendar: gcal_connect (OAuth sign-in, then use gcal_* tools for events, scheduling, free/busy)
 - Notion: extract_auth("notion") once, then use notion_* tools (pages, databases, search, create/edit)
 - Slack: extract_auth("slack") once, then use slack_* tools
+- Google Calendar: gcal_connect (OAuth sign-in, then use gcal_* tools for events, scheduling, free/busy)
 - Gmail: gmail_connect (OAuth sign-in, supports multiple accounts via profile param)
 - WhatsApp: whatsapp_connect (QR code first time, auto-reconnects after)
 
@@ -138,17 +138,18 @@ async function getGCalAuth(profile?: string): Promise<gcal.GCalAuth> {
     return { access_token };
 }
 
+function getGitHubAuth(profile?: string): github.GitHubAuth {
+    const creds = getAuth(profileKey("github", profile));
+    // GitHub can use a PAT token or cookies from browser session
+    const token = creds.token || creds.access_token || creds.pat || "";
+    return { token, _cookies: creds._cookies };
+}
+
 function getNotionAuth(profile?: string): notion.NotionAuth {
     const creds = getAuth(profileKey("notion", profile));
     const token = creds.token_v2 || "";
     if (!token && !creds._cookies) throw new Error(`Missing token_v2. Run extract_auth for notion${profile ? ` (profile: ${profile})` : ""}.`);
     return { token_v2: token, _cookies: creds._cookies };
-}
-
-function getGitHubAuth(profile?: string): github.GitHubAuth {
-    const creds = getAuth(profileKey("github", profile));
-    const token = creds.token || creds.access_token || creds.pat || "";
-    return { token, _cookies: creds._cookies };
 }
 
 function getSlackAuth(profile?: string): slack.SlackAuth {
@@ -1232,6 +1233,173 @@ server.tool(
     }
 );
 
+// ── Cross-Platform Content Repurposer ─────────────────────────────────────────
+
+server.tool(
+    "repurpose_content",
+    `Repurpose content between social media platforms (LinkedIn ↔ Twitter). Analyzes the input text and transforms it to match the target platform's conventions, character limits, formatting style, and audience expectations. Returns ready-to-post content.`,
+    {
+        text: z.string().describe("The original content to repurpose"),
+        from: z.enum(["linkedin", "twitter"]).describe("Source platform"),
+        to: z.enum(["linkedin", "twitter"]).describe("Target platform"),
+        tone: z.enum(["professional", "casual", "thought_leader", "storytelling"]).optional().describe("Desired tone (default: auto-detect from source)"),
+        include_hashtags: z.boolean().optional().describe("Include relevant hashtags (default: true)"),
+    },
+    async ({ text, from, to, tone, include_hashtags }) => {
+        const hashtagsEnabled = include_hashtags !== false;
+
+        if (from === to) {
+            return { content: [{ type: "text", text: "Source and target platforms are the same. No repurposing needed." }] };
+        }
+
+        const result: any = {
+            original: { platform: from, text, char_count: text.length },
+            repurposed: { platform: to },
+        };
+
+        if (from === "linkedin" && to === "twitter") {
+            // LinkedIn → Twitter: condense long-form into tweet-sized content
+            const lines = text.split("\n").filter(l => l.trim());
+            const sentences = text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).filter(s => s.trim());
+
+            // Strategy 1: Single tweet (best hook/takeaway)
+            let tweet = "";
+
+            // Find the strongest opening or hook
+            const hook = lines[0] || sentences[0] || "";
+
+            if (hook.length <= 280) {
+                tweet = hook;
+            } else {
+                // Truncate to fit
+                tweet = hook.slice(0, 275) + "...";
+            }
+
+            // Clean LinkedIn formatting
+            tweet = tweet
+                .replace(/^[🔹🔸▶️➡️•\-\d+.]\s*/gm, "") // remove bullet markers
+                .replace(/#\w+\s*/g, "")  // remove hashtags (we'll add twitter-style ones)
+                .replace(/\s+/g, " ")
+                .trim();
+
+            // Strategy 2: Thread (for long content)
+            const threadTweets: string[] = [];
+            let currentTweet = "";
+
+            for (const sentence of sentences) {
+                const cleaned = sentence.replace(/#\w+\s*/g, "").trim();
+                if (!cleaned) continue;
+
+                if ((currentTweet + " " + cleaned).trim().length <= 270) {
+                    currentTweet = (currentTweet + " " + cleaned).trim();
+                } else {
+                    if (currentTweet) threadTweets.push(currentTweet);
+                    currentTweet = cleaned.length > 270 ? cleaned.slice(0, 267) + "..." : cleaned;
+                }
+            }
+            if (currentTweet) threadTweets.push(currentTweet);
+
+            // Add hashtags
+            if (hashtagsEnabled) {
+                const tags = extractHashtags(text, "twitter");
+                if (tags.length > 0) {
+                    const tagStr = " " + tags.slice(0, 3).join(" ");
+                    if (tweet.length + tagStr.length <= 280) tweet += tagStr;
+                    const lastIdx = threadTweets.length - 1;
+                    if (lastIdx >= 0 && threadTweets[lastIdx].length + tagStr.length <= 280) {
+                        threadTweets[lastIdx] += tagStr;
+                    }
+                }
+            }
+
+            result.repurposed.single_tweet = { text: tweet, char_count: tweet.length };
+            if (threadTweets.length > 1) {
+                result.repurposed.thread = threadTweets.map((t, i) => ({
+                    tweet_number: i + 1,
+                    text: threadTweets.length > 1 ? `${i + 1}/${threadTweets.length} ${t}` : t,
+                    char_count: t.length + (threadTweets.length > 1 ? `${i + 1}/${threadTweets.length} `.length : 0),
+                }));
+            }
+            result.repurposed.recommendation = threadTweets.length > 3
+                ? "Use the thread format — this content is too rich for a single tweet."
+                : "Single tweet recommended. Thread available if you want more detail.";
+
+        } else if (from === "twitter" && to === "linkedin") {
+            // Twitter → LinkedIn: expand into professional long-form
+            const tweetText = text.replace(/@\w+/g, "").replace(/https?:\/\/\S+/g, "").trim();
+
+            // Detect tone
+            const detectedTone = tone || "professional";
+
+            let post = "";
+            switch (detectedTone) {
+                case "thought_leader":
+                    post = `${tweetText}\n\nHere's what most people miss about this:\n\n` +
+                        `The key insight is that this matters more than we think.\n\n` +
+                        `What's your take on this? I'd love to hear different perspectives.`;
+                    break;
+                case "storytelling":
+                    post = `Something caught my attention today.\n\n${tweetText}\n\n` +
+                        `And it made me reflect on how this connects to the bigger picture.\n\n` +
+                        `The lesson? Sometimes the simplest observations lead to the deepest insights.`;
+                    break;
+                case "casual":
+                    post = `${tweetText}\n\nThoughts? 👇`;
+                    break;
+                case "professional":
+                default:
+                    post = `${tweetText}\n\nThis is an important point that deserves more attention.\n\n` +
+                        `What are your thoughts on this?`;
+                    break;
+            }
+
+            // Add LinkedIn-style hashtags
+            if (hashtagsEnabled) {
+                const tags = extractHashtags(text, "linkedin");
+                if (tags.length > 0) {
+                    post += "\n\n" + tags.slice(0, 5).join(" ");
+                }
+            }
+
+            result.repurposed.post = { text: post, char_count: post.length };
+            result.repurposed.tone = detectedTone;
+            result.repurposed.tip = "LinkedIn posts perform best when they tell a story or share a personal insight. Consider adding 1-2 lines about your personal experience with this topic.";
+        }
+
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+function extractHashtags(text: string, platform: "linkedin" | "twitter"): string[] {
+    // Extract existing hashtags
+    const existing = (text.match(/#\w+/g) || []).map(h => h.toLowerCase());
+
+    // Extract key terms for new hashtags
+    const words = text.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter(w => w.length > 4);
+
+    const commonWords = new Set(["about", "would", "could", "should", "their", "there", "which", "being", "these", "those", "other", "after", "before", "every", "never", "always", "really", "think", "people", "things"]);
+    const keywords = words.filter(w => !commonWords.has(w));
+
+    // Count frequency
+    const freq: Record<string, number> = {};
+    for (const w of keywords) freq[w] = (freq[w] || 0) + 1;
+
+    const topWords = Object.entries(freq)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([w]) => `#${w}`);
+
+    const allTags = [...new Set([...existing, ...topWords])];
+
+    if (platform === "twitter") {
+        return allTags.slice(0, 3); // Twitter: fewer hashtags
+    }
+    return allTags.slice(0, 5); // LinkedIn: more hashtags OK
+}
+
 // ── Dynamic Tools (AI creates its own integrations) ──────────────────────────
 
 /**
@@ -2122,6 +2290,39 @@ function registerAllTools(s: McpServer) {
             }
             return { content: [{ type: "text", text: json({ generated_at: new Date().toISOString(), filter: { service, profile }, ...summary }) }] };
         });
+
+    // Cross-Platform Content Repurposer
+    s.tool("repurpose_content", "Repurpose content between LinkedIn and Twitter. Adapts formatting, length, tone, and hashtags.", {
+        text: z.string(), from: z.enum(["linkedin", "twitter"]), to: z.enum(["linkedin", "twitter"]),
+        tone: z.enum(["professional", "casual", "thought_leader", "storytelling"]).optional(),
+        include_hashtags: z.boolean().optional(),
+    }, async ({ text, from, to, tone, include_hashtags }) => {
+        if (from === to) return { content: [{ type: "text", text: "Source and target are the same." }] };
+        const hashtagsEnabled = include_hashtags !== false;
+        const result: any = { original: { platform: from, text, char_count: text.length }, repurposed: { platform: to } };
+        if (from === "linkedin" && to === "twitter") {
+            const sentences = text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).filter(s => s.trim());
+            let tweet = (sentences[0] || text.slice(0, 275)).replace(/^[🔹🔸▶️➡️•\-\d+.]\s*/gm, "").replace(/#\w+\s*/g, "").replace(/\s+/g, " ").trim();
+            if (tweet.length > 280) tweet = tweet.slice(0, 275) + "...";
+            const threadTweets: string[] = []; let cur = "";
+            for (const s of sentences) { const c = s.replace(/#\w+\s*/g, "").trim(); if (!c) continue; if ((cur + " " + c).trim().length <= 270) { cur = (cur + " " + c).trim(); } else { if (cur) threadTweets.push(cur); cur = c.length > 270 ? c.slice(0, 267) + "..." : c; } }
+            if (cur) threadTweets.push(cur);
+            if (hashtagsEnabled) { const tags = extractHashtags(text, "twitter"); if (tags.length > 0) { const ts = " " + tags.slice(0, 3).join(" "); if (tweet.length + ts.length <= 280) tweet += ts; } }
+            result.repurposed.single_tweet = { text: tweet, char_count: tweet.length };
+            if (threadTweets.length > 1) result.repurposed.thread = threadTweets.map((t, i) => ({ tweet_number: i + 1, text: `${i + 1}/${threadTweets.length} ${t}`, char_count: t.length }));
+        } else {
+            const clean = text.replace(/@\w+/g, "").replace(/https?:\/\/\S+/g, "").trim();
+            const t = tone || "professional";
+            let post = t === "thought_leader" ? `${clean}\n\nHere's what most people miss about this:\n\nWhat's your take?`
+                : t === "storytelling" ? `Something caught my attention today.\n\n${clean}\n\nThe lesson? Sometimes the simplest observations lead to the deepest insights.`
+                : t === "casual" ? `${clean}\n\nThoughts? 👇`
+                : `${clean}\n\nThis is an important point that deserves more attention.\n\nWhat are your thoughts?`;
+            if (hashtagsEnabled) { const tags = extractHashtags(text, "linkedin"); if (tags.length > 0) post += "\n\n" + tags.slice(0, 5).join(" "); }
+            result.repurposed.post = { text: post, char_count: post.length };
+            result.repurposed.tone = t;
+        }
+        return { content: [{ type: "text", text: json(result) }] };
+    });
 
     // Dynamic tools
     s.tool("create_tool", "Create a new MCP tool that persists across restarts.", {
