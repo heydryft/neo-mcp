@@ -20,54 +20,71 @@ import * as linkedin from "./integrations/linkedin.js";
 import * as twitter from "./integrations/twitter.js";
 import * as slack from "./integrations/slack.js";
 import * as gmail from "./integrations/gmail.js";
+import * as github from "./integrations/github.js";
+import * as gcal from "./integrations/gcal.js";
+import * as notion from "./integrations/notion.js";
+import * as discord from "./integrations/discord.js";
+import * as gdrive from "./integrations/gdrive.js";
 import * as db from "./db.js";
 import { browserCommand, startBridge, isBridgeConnected } from "./bridge.js";
 
-const NEO_INSTRUCTIONS = `Neo is a browser bridge that lets you operate the user's real accounts — LinkedIn, Twitter/X, Slack, WhatsApp, and ANY website they're logged into. No API keys needed.
+const NEO_INSTRUCTIONS = `Neo gives you direct API access to the user's real accounts — 10x-100x faster than browser automation. No API keys needed. You can operate ANY service the user is logged into.
 
-## Built-in services
-- LinkedIn: extract_auth("linkedin") once, then use linkedin_* tools
-- Twitter/X: extract_auth("twitter") once, then use twitter_* tools
-- Slack: extract_auth("slack") once, then use slack_* tools
-- Gmail: gmail_connect (OAuth sign-in, supports multiple accounts via profile param)
-- WhatsApp: whatsapp_connect (QR code first time, auto-reconnects after)
+## How to handle ANY request
 
-## When a built-in tool doesn't exist for what the user wants
-This is the critical workflow. Follow these steps EVERY TIME:
+STEP 1: Does a built-in tool exist?
+Check the tool list. Tools are prefixed by service: linkedin_*, twitter_*, github_*, notion_*, discord_*, slack_*, gcal_*, gdrive_*, gmail_*, whatsapp_*. Also: meeting_prep, smart_inbox, contact_enrich, content_calendar, pr_digest, repurpose_content, discover_api, web_scrape, diff_monitor.
+→ If yes: call it directly. Chain multiple tools for complex requests.
+→ If no: go to Step 2.
 
-1. extract_auth("servicename") — grab auth tokens from the browser
-2. network_capture(action: "start", navigate: "https://the-site.com/relevant-page") — start capturing network traffic and navigate to the page
-3. network_requests() — list all API calls the page made (you'll see the internal API endpoints)
-4. network_request_detail(id: "...") — pick the relevant request and inspect its FULL headers (you need these for CSRF tokens, auth headers, content-type, etc.)
-5. authenticated_fetch(url, method, headers: {...}) — replay the request with the exact headers you found in step 4
-6. create_tool(...) — once you have a working request, wrap it into a permanent tool so you never repeat this discovery
+STEP 2: Can you compose it from existing tools?
+Most requests are just chains: "summarize my LinkedIn messages" = linkedin_conversations → linkedin_messages → your reasoning.
+"Prep for my 2pm meeting" = gcal_events → meeting_prep or manually linkedin_profile each attendee.
+"What needs my attention?" = smart_inbox (or chain github_notifications + linkedin_conversations + gcal_events yourself).
+→ Think about what data you need, which tools provide it, and chain them. No new tool needed.
 
-## IMPORTANT: authenticated_fetch vs fetch in create_tool
-- authenticated_fetch goes through the browser extension — carries the page's cookies automatically but you CAN'T control CSRF headers (many sites will reject with 403)
-- In create_tool code, use fetch() directly with helpers.credentials() to set cookies and CSRF headers explicitly. This is more reliable.
+STEP 3: The service isn't built-in — reverse-engineer it.
+Use discover_api(url) to auto-extract auth + capture API endpoints from ANY website. Or manually:
+1. extract_auth("domain.com") — grab tokens/cookies from the browser
+2. network_capture(start) + navigate — capture the site's API calls
+3. network_request_detail(id) — inspect headers (CSRF tokens, auth headers, content-type)
+4. authenticated_fetch(url, headers) — replay the request
+5. create_tool(...) — save it permanently so you never repeat discovery
 
-Example — the RIGHT way to call LinkedIn's API in a custom tool:
+## Speed principles
+- ALWAYS prefer neo tools over browser automation. API calls are instant; clicking through pages is slow.
+- Chain tools in parallel when possible (e.g., fetch GitHub + LinkedIn + Calendar simultaneously).
+- For cross-platform tasks, fetch all data first, then reason about it — don't alternate between fetching and thinking.
+- web_scrape returns structured data from any URL — use it instead of authenticated_fetch when you need parsed content, not raw HTML.
+
+## Service connection cheat sheet
+| Service | Setup | Auth method |
+|---------|-------|-------------|
+| LinkedIn | extract_auth("linkedin") | Cookie-based (li_at) |
+| Twitter/X | extract_auth("twitter") | Cookie-based (auth_token) |
+| GitHub | Auto-detects gh CLI, or store_credential("github","token","ghp_...") | PAT token |
+| Notion | extract_auth("notion") | Cookie-based (token_v2) |
+| Discord | extract_auth("discord") | Token-based |
+| Slack | extract_auth("slack") | Cookie-based (xoxc) |
+| Google Calendar | gcal_connect | OAuth |
+| Google Drive | gdrive_connect | OAuth |
+| Gmail | gmail_connect | OAuth |
+| WhatsApp | whatsapp_connect | QR code |
+| Any other site | extract_auth("domain") + discover_api | Cookie/token |
+
+## create_tool — make permanent tools on the fly
+Creates a real MCP tool, available immediately (no restart). Use after discover_api to save a working pattern.
+Code runs as async JS with: params, fetch, helpers.credentials(service), helpers.browserFetch(url, opts), helpers.store(service, key, val), helpers.query(collection, opts), helpers.insert(collection, data).
+
+IMPORTANT: In create_tool code, use fetch() with explicit headers from helpers.credentials() — NOT authenticated_fetch (which can't set CSRF headers). Example:
   const creds = helpers.credentials("linkedin");
-  const res = await fetch(url, {
-    headers: {
-      "Cookie": "li_at=" + creds.li_at + "; JSESSIONID=\\"" + creds.jsessionid + "\\"",
-      "csrf-token": creds.jsessionid,
-      "x-restli-protocol-version": "2.0.0",
-    }
-  });
+  const res = await fetch(url, { headers: { "Cookie": "li_at=" + creds.li_at, "csrf-token": creds.jsessionid } });
 
-Use network_request_detail to discover what headers a site needs, then replicate them with fetch() + helpers.credentials() in create_tool.
+## Collections — persistent structured storage
+Create SQLite tables on the fly with collection_create. Use for: tracking state across sessions, storing scraped data, content calendars, monitoring snapshots. Full-text search built in.
 
-## create_tool
-Creates a REAL MCP tool available immediately (no restart needed). The AI writes JavaScript that runs with:
-- params — tool input parameters
-- helpers.credentials(service) — stored auth tokens (from extract_auth)
-- helpers.browserFetch(url, opts) — request from browser context (auto cookies, no custom headers)
-- helpers.store(service, key, val) — store a credential
-- helpers.query(collection, opts) / helpers.insert(collection, data) — SQLite collections
-- fetch — standard fetch (YOU control all headers, cookies, body — use this for API calls)
-
-Always create_tool after you get a working pattern. This saves the user from waiting for rediscovery next time.`;
+## diff_monitor — watch anything for changes
+Monitor any URL or API endpoint for changes. Stores snapshots in collections, compares on each run, reports diffs. Use for price tracking, job posting changes, competitor monitoring, or any "tell me when X changes" request.`;
 
 const server = new McpServer(
     { name: "neo", version: "1.0.0" },
@@ -123,6 +140,52 @@ async function getGmailAuth(profile?: string): Promise<gmail.GmailAuth> {
     if (!creds.refresh_token) throw new Error(`Gmail not connected${profile ? ` for profile "${profile}"` : ""}. Use gmail_connect to authenticate.`);
     const access_token = await gmail.refreshAccessToken(creds.refresh_token, profile || "default");
     return { access_token };
+}
+
+async function getGCalAuth(profile?: string): Promise<gcal.GCalAuth> {
+    const creds = getAuth(profileKey("gcal", profile));
+    if (!creds.refresh_token) throw new Error(`Google Calendar not connected${profile ? ` for profile "${profile}"` : ""}. Use gcal_connect to authenticate.`);
+    const access_token = await gcal.refreshAccessToken(creds.refresh_token, profile || "default");
+    return { access_token };
+}
+
+async function getGDriveAuth(profile?: string): Promise<gdrive.GDriveAuth> {
+    const creds = getAuth(profileKey("gdrive", profile));
+    if (!creds.refresh_token) throw new Error(`Google Drive not connected${profile ? ` for profile "${profile}"` : ""}. Use gdrive_connect to authenticate.`);
+    const access_token = await gdrive.refreshAccessToken(creds.refresh_token, profile || "default");
+    return { access_token };
+}
+
+function getGitHubAuth(profile?: string): github.GitHubAuth {
+    const creds = getAuth(profileKey("github", profile));
+    let token = creds.token || creds.access_token || creds.pat || "";
+    // If no token stored, try extracting from gh CLI
+    if (!token) {
+        try {
+            const result = require("child_process").execSync("gh auth token 2>/dev/null", { encoding: "utf-8", timeout: 5000 }).trim();
+            if (result && result.startsWith("gh")) {
+                token = result;
+                // Store for future use
+                try { db.storeCredential(profileKey("github", profile), "token", token); } catch {}
+            }
+        } catch {}
+    }
+    if (!token) throw new Error('GitHub requires a Personal Access Token. Either: (1) Run `gh auth login` in terminal, or (2) Use store_credential("github", "token", "ghp_YOUR_TOKEN") with a PAT from https://github.com/settings/tokens');
+    return { token, _cookies: creds._cookies };
+}
+
+function getNotionAuth(profile?: string): notion.NotionAuth {
+    const creds = getAuth(profileKey("notion", profile));
+    const token = creds.token_v2 || "";
+    if (!token && !creds._cookies) throw new Error(`Missing token_v2. Run extract_auth for notion${profile ? ` (profile: ${profile})` : ""}.`);
+    return { token_v2: token, _cookies: creds._cookies };
+}
+
+function getDiscordAuth(profile?: string): discord.DiscordAuth {
+    const creds = getAuth(profileKey("discord", profile));
+    const token = creds.token || "";
+    if (!token) throw new Error(`Discord not connected. Run extract_auth("discord") first${profile ? ` (profile: ${profile})` : ""}.`);
+    return { token, _cookies: creds._cookies };
 }
 
 function getSlackAuth(profile?: string): slack.SlackAuth {
@@ -328,6 +391,106 @@ server.tool(
     }
 );
 
+server.tool(
+    "linkedin_conversations",
+    "List your recent LinkedIn message conversations.",
+    { count: z.number().optional().describe("Number of conversations (default 20)"), ...profileParam },
+    async ({ count, profile }) => {
+        const results = await linkedin.getConversations(getLinkedInAuth(profile), count || 20);
+        return { content: [{ type: "text", text: json(results) }] };
+    }
+);
+
+server.tool(
+    "linkedin_messages",
+    "Get messages in a specific LinkedIn conversation. Pass the conversationId from linkedin_conversations.",
+    { conversation_id: z.string().describe("Conversation ID or URN from linkedin_conversations"), count: z.number().optional(), ...profileParam },
+    async ({ conversation_id, count, profile }) => {
+        const results = await linkedin.getConversationMessages(getLinkedInAuth(profile), conversation_id, count || 20);
+        return { content: [{ type: "text", text: json(results) }] };
+    }
+);
+
+server.tool(
+    "linkedin_send_message",
+    "Send a LinkedIn message to a connection. Pass their profile URN or vanity name (URL slug).",
+    { recipient: z.string().describe("Recipient's vanity name or member URN"), message: z.string().describe("Message text"), ...profileParam },
+    async ({ recipient, message, profile }) => {
+        const result = await linkedin.sendMessage(getLinkedInAuth(profile), recipient, message);
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+server.tool(
+    "linkedin_react",
+    "React to a LinkedIn post (like, celebrate, support, love, insightful, funny).",
+    { post_urn: z.string().describe("Post URN from linkedin_feed or linkedin_my_posts"), reaction: z.enum(["LIKE", "CELEBRATE", "SUPPORT", "LOVE", "INSIGHTFUL", "FUNNY"]).optional().describe("Reaction type (default LIKE)"), ...profileParam },
+    async ({ post_urn, reaction, profile }) => {
+        const result = await linkedin.reactToPost(getLinkedInAuth(profile), post_urn, reaction || "LIKE");
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+server.tool(
+    "linkedin_comment",
+    "Comment on a LinkedIn post.",
+    { post_urn: z.string().describe("Post URN"), text: z.string().describe("Comment text"), ...profileParam },
+    async ({ post_urn, text, profile }) => {
+        const result = await linkedin.commentOnPost(getLinkedInAuth(profile), post_urn, text);
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+server.tool(
+    "linkedin_post_comments",
+    "Get comments on a LinkedIn post.",
+    { post_urn: z.string().describe("Post URN"), count: z.number().optional(), ...profileParam },
+    async ({ post_urn, count, profile }) => {
+        const results = await linkedin.getPostComments(getLinkedInAuth(profile), post_urn, count || 20);
+        return { content: [{ type: "text", text: json(results) }] };
+    }
+);
+
+server.tool(
+    "linkedin_notifications",
+    "Get your recent LinkedIn notifications.",
+    { count: z.number().optional().describe("Number of notifications (default 20)"), ...profileParam },
+    async ({ count, profile }) => {
+        const results = await linkedin.getNotifications(getLinkedInAuth(profile), count || 20);
+        return { content: [{ type: "text", text: json(results) }] };
+    }
+);
+
+server.tool(
+    "linkedin_send_connection",
+    "Send a connection request to a LinkedIn user.",
+    { vanity_name: z.string().describe("Recipient's vanity name (URL slug)"), message: z.string().optional().describe("Optional personalized message"), ...profileParam },
+    async ({ vanity_name, message, profile }) => {
+        const result = await linkedin.sendConnectionRequest(getLinkedInAuth(profile), vanity_name, message);
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+server.tool(
+    "linkedin_invitations",
+    "Get your pending connection requests (received).",
+    { count: z.number().optional(), ...profileParam },
+    async ({ count, profile }) => {
+        const results = await linkedin.getInvitations(getLinkedInAuth(profile), count || 20);
+        return { content: [{ type: "text", text: json(results) }] };
+    }
+);
+
+server.tool(
+    "linkedin_respond_invitation",
+    "Accept or decline a pending connection request.",
+    { invitation_id: z.string().describe("Invitation ID or URN from linkedin_invitations"), accept: z.boolean().describe("true to accept, false to decline"), ...profileParam },
+    async ({ invitation_id, accept, profile }) => {
+        const result = await linkedin.respondToInvitation(getLinkedInAuth(profile), invitation_id, accept);
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
 // ── Twitter/X ────────────────────────────────────────────────────────────────
 
 server.tool(
@@ -379,6 +542,250 @@ server.tool(
         return { content: [{ type: "text", text: json(tweets) }] };
     }
 );
+
+// ── GitHub ────────────────────────────────────────────────────────────────────
+
+server.tool("github_me", "Get your authenticated GitHub profile.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await github.getAuthenticatedUser(getGitHubAuth(profile))) }] }));
+server.tool("github_user", "Get a GitHub user's profile.", { username: z.string(), ...profileParam },
+    async ({ username, profile }) => ({ content: [{ type: "text", text: json(await github.getUserProfile(getGitHubAuth(profile), username)) }] }));
+server.tool("github_repos", "List your GitHub repos.", { count: z.number().optional(), sort: z.enum(["updated", "created", "pushed", "full_name"]).optional(), ...profileParam },
+    async ({ count, sort, profile }) => ({ content: [{ type: "text", text: json(await github.listMyRepos(getGitHubAuth(profile), count || 30, sort || "updated")) }] }));
+server.tool("github_repo", "Get details about a GitHub repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+    async ({ owner, repo, profile }) => ({ content: [{ type: "text", text: json(await github.getRepo(getGitHubAuth(profile), owner, repo)) }] }));
+server.tool("github_search_repos", "Search GitHub repositories.", { query: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchRepos(getGitHubAuth(profile), query, count || 20)) }] }));
+server.tool("github_issues", "List issues for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), labels: z.string().optional(), count: z.number().optional(), ...profileParam },
+    async ({ owner, repo, state, labels, count, profile }) => ({ content: [{ type: "text", text: json(await github.listIssues(getGitHubAuth(profile), owner, repo, { state, labels, count })) }] }));
+server.tool("github_issue", "Get a specific issue.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getIssue(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_create_issue", "Create a GitHub issue.", { owner: z.string(), repo: z.string(), title: z.string(), body: z.string().optional(), labels: z.array(z.string()).optional(), assignees: z.array(z.string()).optional(), ...profileParam },
+    async ({ owner, repo, title, body, labels, assignees, profile }) => ({ content: [{ type: "text", text: json(await github.createIssue(getGitHubAuth(profile), owner, repo, title, body, labels, assignees)) }] }));
+server.tool("github_comment_issue", "Comment on a GitHub issue or PR.", { owner: z.string(), repo: z.string(), number: z.number(), body: z.string(), ...profileParam },
+    async ({ owner, repo, number, body, profile }) => ({ content: [{ type: "text", text: json(await github.commentOnIssue(getGitHubAuth(profile), owner, repo, number, body)) }] }));
+server.tool("github_prs", "List pull requests for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), count: z.number().optional(), ...profileParam },
+    async ({ owner, repo, state, count, profile }) => ({ content: [{ type: "text", text: json(await github.listPRs(getGitHubAuth(profile), owner, repo, { state, count })) }] }));
+server.tool("github_pr", "Get details about a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPR(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_pr_files", "Get files changed in a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRFiles(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_create_pr", "Create a pull request.", { owner: z.string(), repo: z.string(), title: z.string(), head: z.string(), base: z.string(), body: z.string().optional(), draft: z.boolean().optional(), ...profileParam },
+    async ({ owner, repo, title, head, base, body, draft, profile }) => ({ content: [{ type: "text", text: json(await github.createPR(getGitHubAuth(profile), owner, repo, title, head, base, body, draft)) }] }));
+server.tool("github_merge_pr", "Merge a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), method: z.enum(["merge", "squash", "rebase"]).optional(), commit_message: z.string().optional(), ...profileParam },
+    async ({ owner, repo, number, method, commit_message, profile }) => ({ content: [{ type: "text", text: json(await github.mergePR(getGitHubAuth(profile), owner, repo, number, method || "merge", commit_message)) }] }));
+server.tool("github_pr_reviews", "Get reviews on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+    async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRReviews(getGitHubAuth(profile), owner, repo, number)) }] }));
+server.tool("github_review_pr", "Submit a review on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]), body: z.string().optional(), ...profileParam },
+    async ({ owner, repo, number, event, body, profile }) => ({ content: [{ type: "text", text: json(await github.createPRReview(getGitHubAuth(profile), owner, repo, number, event, body)) }] }));
+server.tool("github_notifications", "Get your GitHub notifications.", { count: z.number().optional(), all: z.boolean().optional(), ...profileParam },
+    async ({ count, all, profile }) => ({ content: [{ type: "text", text: json(await github.getNotifications(getGitHubAuth(profile), count || 30, all || false)) }] }));
+server.tool("github_mark_notification_read", "Mark a notification as read.", { thread_id: z.string(), ...profileParam },
+    async ({ thread_id, profile }) => { await github.markNotificationRead(getGitHubAuth(profile), thread_id); return { content: [{ type: "text", text: "Marked as read." }] }; });
+server.tool("github_search_code", "Search code on GitHub.", { query: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchCode(getGitHubAuth(profile), query, count || 20)) }] }));
+server.tool("github_search_users", "Search GitHub users.", { query: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchUsers(getGitHubAuth(profile), query, count || 20)) }] }));
+server.tool("github_starred", "List your starred repos.", { count: z.number().optional(), ...profileParam },
+    async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listStarred(getGitHubAuth(profile), count || 30)) }] }));
+server.tool("github_star", "Star a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+    async ({ owner, repo, profile }) => { await github.starRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Starred." }] }; });
+server.tool("github_unstar", "Unstar a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+    async ({ owner, repo, profile }) => { await github.unstarRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Unstarred." }] }; });
+server.tool("github_gists", "List your gists.", { count: z.number().optional(), ...profileParam },
+    async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listGists(getGitHubAuth(profile), count || 20)) }] }));
+server.tool("github_create_gist", "Create a gist.", { files: z.record(z.string(), z.string()).describe("Filename → content map"), description: z.string().optional(), public: z.boolean().optional(), ...profileParam },
+    async ({ files, description, public: isPublic, profile }) => ({ content: [{ type: "text", text: json(await github.createGist(getGitHubAuth(profile), files, description, isPublic || false)) }] }));
+server.tool("github_actions", "List recent workflow runs for a repo.", { owner: z.string(), repo: z.string(), count: z.number().optional(), ...profileParam },
+    async ({ owner, repo, count, profile }) => ({ content: [{ type: "text", text: json(await github.listWorkflowRuns(getGitHubAuth(profile), owner, repo, count || 10)) }] }));
+server.tool("github_action_run", "Get details about a workflow run.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+    async ({ owner, repo, run_id, profile }) => ({ content: [{ type: "text", text: json(await github.getWorkflowRun(getGitHubAuth(profile), owner, repo, run_id)) }] }));
+server.tool("github_rerun_workflow", "Re-run a failed workflow.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+    async ({ owner, repo, run_id, profile }) => { await github.rerunWorkflow(getGitHubAuth(profile), owner, repo, run_id); return { content: [{ type: "text", text: "Re-run triggered." }] }; });
+server.tool("github_file", "Get file or directory contents from a repo.", { owner: z.string(), repo: z.string(), path: z.string(), ref: z.string().optional().describe("Branch, tag, or commit SHA"), ...profileParam },
+    async ({ owner, repo, path, ref, profile }) => ({ content: [{ type: "text", text: json(await github.getFileContent(getGitHubAuth(profile), owner, repo, path, ref)) }] }));
+
+// ── Google Calendar ───────────────────────────────────────────────────────────
+
+server.tool("gcal_connect", "Connect a Google Calendar account via OAuth. Opens Google sign-in in the browser.",
+    { profile: z.string().optional().describe("Account name (e.g. 'personal', 'work'). Omit for default.") },
+    async ({ profile }) => {
+        const authUrl = `http://127.0.0.1:${httpPort}/gcal/auth${profile ? `?profile=${profile}` : ""}`;
+        try { await browserCommand("navigate", { url: authUrl }); } catch {}
+        const storageKey = profileKey("gcal", profile);
+        const deadline = Date.now() + 120000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2000));
+            const creds = memCredentials.get(storageKey);
+            if (creds?.refresh_token) {
+                const label = profile ? ` as "${profile}"` : "";
+                return { content: [{ type: "text", text: `Google Calendar connected${label}.` }] };
+            }
+        }
+        return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+    }
+);
+server.tool("gcal_calendars", "List your Google Calendar calendars.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gcal.listCalendars(await getGCalAuth(profile))) }] }));
+server.tool("gcal_events", "List upcoming calendar events.", {
+    calendar_id: z.string().optional().describe("Calendar ID (default: primary)"),
+    time_min: z.string().optional().describe("Start time ISO 8601 (default: now)"),
+    time_max: z.string().optional().describe("End time ISO 8601"),
+    max_results: z.number().optional(),
+    query: z.string().optional().describe("Free-text search"),
+    ...profileParam,
+}, async ({ calendar_id, time_min, time_max, max_results, query, profile }) => ({
+    content: [{ type: "text", text: json(await gcal.listEvents(await getGCalAuth(profile), calendar_id || "primary", { timeMin: time_min, timeMax: time_max, maxResults: max_results, query })) }],
+}));
+server.tool("gcal_event", "Get a specific calendar event.", { calendar_id: z.string().optional(), event_id: z.string(), ...profileParam },
+    async ({ calendar_id, event_id, profile }) => ({ content: [{ type: "text", text: json(await gcal.getEvent(await getGCalAuth(profile), calendar_id || "primary", event_id)) }] }));
+server.tool("gcal_create_event", "Create a calendar event.", {
+    summary: z.string(), description: z.string().optional(), location: z.string().optional(),
+    start: z.string().describe("Start time (ISO 8601 datetime or YYYY-MM-DD for all-day)"),
+    end: z.string().describe("End time (ISO 8601 datetime or YYYY-MM-DD for all-day)"),
+    attendees: z.array(z.string()).optional().describe("Email addresses of attendees"),
+    time_zone: z.string().optional(), calendar_id: z.string().optional(),
+    recurrence: z.array(z.string()).optional().describe("RRULE strings, e.g. ['RRULE:FREQ=WEEKLY;COUNT=10']"),
+    add_meet: z.boolean().optional().describe("Add a Google Meet link"),
+    ...profileParam,
+}, async ({ summary, description, location, start, end, attendees, time_zone, calendar_id, recurrence, add_meet, profile }) => ({
+    content: [{ type: "text", text: json(await gcal.createEvent(await getGCalAuth(profile), calendar_id || "primary", { summary, description, location, start, end, attendees, timeZone: time_zone, recurrence, conferenceData: add_meet })) }],
+}));
+server.tool("gcal_update_event", "Update a calendar event.", {
+    event_id: z.string(), calendar_id: z.string().optional(),
+    summary: z.string().optional(), description: z.string().optional(), location: z.string().optional(),
+    start: z.string().optional(), end: z.string().optional(), time_zone: z.string().optional(),
+    ...profileParam,
+}, async ({ event_id, calendar_id, summary, description, location, start, end, time_zone, profile }) => ({
+    content: [{ type: "text", text: json(await gcal.updateEvent(await getGCalAuth(profile), calendar_id || "primary", event_id, { summary, description, location, start, end, timeZone: time_zone })) }],
+}));
+server.tool("gcal_delete_event", "Delete a calendar event.", { event_id: z.string(), calendar_id: z.string().optional(), ...profileParam },
+    async ({ event_id, calendar_id, profile }) => { await gcal.deleteEvent(await getGCalAuth(profile), calendar_id || "primary", event_id); return { content: [{ type: "text", text: "Event deleted." }] }; });
+server.tool("gcal_respond", "Respond to a calendar invite (accept/decline/tentative).", {
+    event_id: z.string(), response: z.enum(["accepted", "declined", "tentative"]), calendar_id: z.string().optional(), ...profileParam,
+}, async ({ event_id, response, calendar_id, profile }) => ({
+    content: [{ type: "text", text: json(await gcal.respondToEvent(await getGCalAuth(profile), calendar_id || "primary", event_id, response)) }],
+}));
+server.tool("gcal_quick_add", "Create an event from natural language text (e.g. 'Lunch with John tomorrow at noon').", {
+    text: z.string(), calendar_id: z.string().optional(), ...profileParam,
+}, async ({ text, calendar_id, profile }) => ({
+    content: [{ type: "text", text: json(await gcal.quickAddEvent(await getGCalAuth(profile), calendar_id || "primary", text)) }],
+}));
+server.tool("gcal_freebusy", "Check free/busy status for calendars.", {
+    calendar_ids: z.array(z.string()).optional().describe("Calendar IDs (default: [primary])"),
+    time_min: z.string().describe("Start time ISO 8601"),
+    time_max: z.string().describe("End time ISO 8601"),
+    ...profileParam,
+}, async ({ calendar_ids, time_min, time_max, profile }) => ({
+    content: [{ type: "text", text: json(await gcal.freeBusy(await getGCalAuth(profile), calendar_ids || ["primary"], time_min, time_max)) }],
+}));
+
+// ── Notion ─────────────────────────────────────────────────────────────────────
+
+server.tool("notion_spaces", "List your Notion workspaces.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await notion.getSpaces(getNotionAuth(profile))) }] }));
+server.tool("notion_search", "Search Notion pages and databases.", { query: z.string(), limit: z.number().optional(), type: z.string().optional().describe("Filter type: page, collection, etc."), ...profileParam },
+    async ({ query, limit, type, profile }) => ({ content: [{ type: "text", text: json(await notion.search(getNotionAuth(profile), query, { limit, type })) }] }));
+server.tool("notion_page", "Get a Notion page with its child blocks.", { page_id: z.string().describe("Page ID, UUID, or Notion URL"), ...profileParam },
+    async ({ page_id, profile }) => ({ content: [{ type: "text", text: json(await notion.getPage(getNotionAuth(profile), page_id)) }] }));
+server.tool("notion_page_content", "Get a Notion page's content as readable markdown text.", { page_id: z.string().describe("Page ID, UUID, or Notion URL"), ...profileParam },
+    async ({ page_id, profile }) => ({ content: [{ type: "text", text: await notion.getPageContent(getNotionAuth(profile), page_id) }] }));
+server.tool("notion_block", "Get a specific Notion block.", { block_id: z.string(), ...profileParam },
+    async ({ block_id, profile }) => ({ content: [{ type: "text", text: json(await notion.getBlock(getNotionAuth(profile), block_id)) }] }));
+server.tool("notion_create_page", "Create a new Notion page.", { parent_id: z.string().describe("Parent page ID or URL"), title: z.string(), content: z.string().optional().describe("Initial text content (one paragraph per line)"), ...profileParam },
+    async ({ parent_id, title, content, profile }) => ({ content: [{ type: "text", text: json(await notion.createPage(getNotionAuth(profile), parent_id, title, content)) }] }));
+server.tool("notion_append", "Append a block to a Notion page.", { page_id: z.string(), text: z.string(), type: z.enum(["text", "header", "sub_header", "bulleted_list", "numbered_list", "to_do", "toggle", "quote", "code", "divider"]).optional(), ...profileParam },
+    async ({ page_id, text, type, profile }) => ({ content: [{ type: "text", text: json(await notion.appendBlock(getNotionAuth(profile), page_id, text, type || "text")) }] }));
+server.tool("notion_update_block", "Update the text of a Notion block.", { block_id: z.string(), text: z.string(), ...profileParam },
+    async ({ block_id, text, profile }) => ({ content: [{ type: "text", text: json(await notion.updateBlock(getNotionAuth(profile), block_id, text)) }] }));
+server.tool("notion_delete_block", "Delete a Notion block.", { block_id: z.string(), ...profileParam },
+    async ({ block_id, profile }) => { await notion.deleteBlock(getNotionAuth(profile), block_id); return { content: [{ type: "text", text: "Block deleted." }] }; });
+server.tool("notion_database", "Query a Notion database (collection).", { collection_id: z.string(), view_id: z.string(), limit: z.number().optional(), query: z.string().optional(), ...profileParam },
+    async ({ collection_id, view_id, limit, query, profile }) => ({ content: [{ type: "text", text: json(await notion.queryDatabase(getNotionAuth(profile), collection_id, view_id, { limit, query })) }] }));
+server.tool("notion_recent", "Get your recently visited Notion pages.", { limit: z.number().optional(), ...profileParam },
+    async ({ limit, profile }) => ({ content: [{ type: "text", text: json(await notion.getRecentPages(getNotionAuth(profile), limit || 20)) }] }));
+
+// ── Discord ───────────────────────────────────────────────────────────────────
+
+server.tool("discord_me", "Get your Discord profile.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await discord.getMe(getDiscordAuth(profile))) }] }));
+server.tool("discord_guilds", "List your Discord servers.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await discord.listGuilds(getDiscordAuth(profile))) }] }));
+server.tool("discord_guild", "Get Discord server details.", { guild_id: z.string(), ...profileParam },
+    async ({ guild_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getGuild(getDiscordAuth(profile), guild_id)) }] }));
+server.tool("discord_channels", "List channels in a Discord server.", { guild_id: z.string(), ...profileParam },
+    async ({ guild_id, profile }) => ({ content: [{ type: "text", text: json(await discord.listChannels(getDiscordAuth(profile), guild_id)) }] }));
+server.tool("discord_messages", "Read messages from a Discord channel.", { channel_id: z.string(), limit: z.number().optional(), ...profileParam },
+    async ({ channel_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.readMessages(getDiscordAuth(profile), channel_id, limit || 50)) }] }));
+server.tool("discord_send", "Send a message to a Discord channel.", { channel_id: z.string(), content: z.string(), ...profileParam },
+    async ({ channel_id, content, profile }) => ({ content: [{ type: "text", text: json(await discord.sendMessage(getDiscordAuth(profile), channel_id, content)) }] }));
+server.tool("discord_channel", "Get Discord channel info.", { channel_id: z.string(), ...profileParam },
+    async ({ channel_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getChannel(getDiscordAuth(profile), channel_id)) }] }));
+server.tool("discord_search", "Search messages in a Discord server.", { guild_id: z.string(), query: z.string(), limit: z.number().optional(), ...profileParam },
+    async ({ guild_id, query, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.searchMessages(getDiscordAuth(profile), guild_id, query, limit || 25)) }] }));
+server.tool("discord_dms", "List your Discord DM channels.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await discord.listDMs(getDiscordAuth(profile))) }] }));
+server.tool("discord_read_dm", "Read DM messages.", { channel_id: z.string(), limit: z.number().optional(), ...profileParam },
+    async ({ channel_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.readDMs(getDiscordAuth(profile), channel_id, limit || 50)) }] }));
+server.tool("discord_send_dm", "Send a DM to a user.", { user_id: z.string(), content: z.string(), ...profileParam },
+    async ({ user_id, content, profile }) => ({ content: [{ type: "text", text: json(await discord.sendDM(getDiscordAuth(profile), user_id, content)) }] }));
+server.tool("discord_react", "Add a reaction to a message.", { channel_id: z.string(), message_id: z.string(), emoji: z.string(), ...profileParam },
+    async ({ channel_id, message_id, emoji, profile }) => { await discord.addReaction(getDiscordAuth(profile), channel_id, message_id, emoji); return { content: [{ type: "text", text: "Reaction added." }] }; });
+server.tool("discord_unreact", "Remove a reaction from a message.", { channel_id: z.string(), message_id: z.string(), emoji: z.string(), ...profileParam },
+    async ({ channel_id, message_id, emoji, profile }) => { await discord.removeReaction(getDiscordAuth(profile), channel_id, message_id, emoji); return { content: [{ type: "text", text: "Reaction removed." }] }; });
+server.tool("discord_members", "List members of a Discord server.", { guild_id: z.string(), limit: z.number().optional(), ...profileParam },
+    async ({ guild_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.getGuildMembers(getDiscordAuth(profile), guild_id, limit || 100)) }] }));
+server.tool("discord_user", "Get a Discord user's profile.", { user_id: z.string(), ...profileParam },
+    async ({ user_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getUserProfile(getDiscordAuth(profile), user_id)) }] }));
+
+// ── Google Drive ──────────────────────────────────────────────────────────────
+
+server.tool("gdrive_connect", "Connect a Google Drive account via OAuth.",
+    { profile: z.string().optional().describe("Account name (e.g. 'personal', 'work')") },
+    async ({ profile }) => {
+        const authUrl = `http://127.0.0.1:${httpPort}/gdrive/auth${profile ? `?profile=${profile}` : ""}`;
+        try { await browserCommand("navigate", { url: authUrl }); } catch {}
+        const storageKey = profileKey("gdrive", profile);
+        const deadline = Date.now() + 120000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2000));
+            const creds = memCredentials.get(storageKey);
+            if (creds?.refresh_token) {
+                return { content: [{ type: "text", text: `Google Drive connected${profile ? ` as "${profile}"` : ""}.` }] };
+            }
+        }
+        return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+    }
+);
+server.tool("gdrive_files", "List files in Google Drive.", {
+    query: z.string().optional().describe("Drive search query (e.g. \"name contains 'report'\")"),
+    folder_id: z.string().optional().describe("Folder ID to list contents of"),
+    page_size: z.number().optional(),
+    order_by: z.string().optional().describe("Sort order (e.g. 'modifiedTime desc')"),
+    ...profileParam,
+}, async ({ query, folder_id, page_size, order_by, profile }) => ({
+    content: [{ type: "text", text: json(await gdrive.listFiles(await getGDriveAuth(profile), { query, folderId: folder_id, pageSize: page_size, orderBy: order_by })) }],
+}));
+server.tool("gdrive_file", "Get file metadata.", { file_id: z.string(), ...profileParam },
+    async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFile(await getGDriveAuth(profile), file_id)) }] }));
+server.tool("gdrive_search", "Search files by name.", { query: z.string(), page_size: z.number().optional(), ...profileParam },
+    async ({ query, page_size, profile }) => ({ content: [{ type: "text", text: json(await gdrive.searchFiles(await getGDriveAuth(profile), query, page_size)) }] }));
+server.tool("gdrive_read", "Read file content (Google Docs→text, Sheets→CSV, others→download).", { file_id: z.string(), ...profileParam },
+    async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFileContent(await getGDriveAuth(profile), file_id)) }] }));
+server.tool("gdrive_create", "Create a file in Google Drive.", {
+    name: z.string(), content: z.string(), mime_type: z.string().optional(), folder_id: z.string().optional(), ...profileParam,
+}, async ({ name, content, mime_type, folder_id, profile }) => ({
+    content: [{ type: "text", text: json(await gdrive.createFile(await getGDriveAuth(profile), name, content, mime_type, folder_id)) }],
+}));
+server.tool("gdrive_update", "Update a file's content.", { file_id: z.string(), content: z.string(), mime_type: z.string().optional(), ...profileParam },
+    async ({ file_id, content, mime_type, profile }) => ({ content: [{ type: "text", text: json(await gdrive.updateFile(await getGDriveAuth(profile), file_id, content, mime_type)) }] }));
+server.tool("gdrive_delete", "Move a file to trash.", { file_id: z.string(), ...profileParam },
+    async ({ file_id, profile }) => { await gdrive.deleteFile(await getGDriveAuth(profile), file_id); return { content: [{ type: "text", text: "File moved to trash." }] }; });
+server.tool("gdrive_create_folder", "Create a folder.", { name: z.string(), parent_id: z.string().optional(), ...profileParam },
+    async ({ name, parent_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.createFolder(await getGDriveAuth(profile), name, parent_id)) }] }));
+server.tool("gdrive_shared_drives", "List shared drives.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.listSharedDrives(await getGDriveAuth(profile))) }] }));
+server.tool("gdrive_quota", "Get storage quota.", { ...profileParam },
+    async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.getStorageQuota(await getGDriveAuth(profile))) }] }));
 
 // ── Collections (agent-designed data storage) ────────────────────────────────
 
@@ -945,6 +1352,604 @@ server.tool(
     }
 );
 
+// ── Cross-Platform Content Repurposer ─────────────────────────────────────────
+
+server.tool(
+    "repurpose_content",
+    `Repurpose content between social media platforms (LinkedIn ↔ Twitter). Analyzes the input text and transforms it to match the target platform's conventions, character limits, formatting style, and audience expectations. Returns ready-to-post content.`,
+    {
+        text: z.string().describe("The original content to repurpose"),
+        from: z.enum(["linkedin", "twitter"]).describe("Source platform"),
+        to: z.enum(["linkedin", "twitter"]).describe("Target platform"),
+        tone: z.enum(["professional", "casual", "thought_leader", "storytelling"]).optional().describe("Desired tone (default: auto-detect from source)"),
+        include_hashtags: z.boolean().optional().describe("Include relevant hashtags (default: true)"),
+    },
+    async ({ text, from, to, tone, include_hashtags }) => {
+        const hashtagsEnabled = include_hashtags !== false;
+
+        if (from === to) {
+            return { content: [{ type: "text", text: "Source and target platforms are the same. No repurposing needed." }] };
+        }
+
+        const result: any = {
+            original: { platform: from, text, char_count: text.length },
+            repurposed: { platform: to },
+        };
+
+        if (from === "linkedin" && to === "twitter") {
+            // LinkedIn → Twitter: condense long-form into tweet-sized content
+            const lines = text.split("\n").filter(l => l.trim());
+            const sentences = text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).filter(s => s.trim());
+
+            // Strategy 1: Single tweet (best hook/takeaway)
+            let tweet = "";
+
+            // Find the strongest opening or hook
+            const hook = lines[0] || sentences[0] || "";
+
+            if (hook.length <= 280) {
+                tweet = hook;
+            } else {
+                // Truncate to fit
+                tweet = hook.slice(0, 275) + "...";
+            }
+
+            // Clean LinkedIn formatting
+            tweet = tweet
+                .replace(/^[🔹🔸▶️➡️•\-\d+.]\s*/gm, "") // remove bullet markers
+                .replace(/#\w+\s*/g, "")  // remove hashtags (we'll add twitter-style ones)
+                .replace(/\s+/g, " ")
+                .trim();
+
+            // Strategy 2: Thread (for long content)
+            const threadTweets: string[] = [];
+            let currentTweet = "";
+
+            for (const sentence of sentences) {
+                const cleaned = sentence.replace(/#\w+\s*/g, "").trim();
+                if (!cleaned) continue;
+
+                if ((currentTweet + " " + cleaned).trim().length <= 270) {
+                    currentTweet = (currentTweet + " " + cleaned).trim();
+                } else {
+                    if (currentTweet) threadTweets.push(currentTweet);
+                    currentTweet = cleaned.length > 270 ? cleaned.slice(0, 267) + "..." : cleaned;
+                }
+            }
+            if (currentTweet) threadTweets.push(currentTweet);
+
+            // Add hashtags
+            if (hashtagsEnabled) {
+                const tags = extractHashtags(text, "twitter");
+                if (tags.length > 0) {
+                    const tagStr = " " + tags.slice(0, 3).join(" ");
+                    if (tweet.length + tagStr.length <= 280) tweet += tagStr;
+                    const lastIdx = threadTweets.length - 1;
+                    if (lastIdx >= 0 && threadTweets[lastIdx].length + tagStr.length <= 280) {
+                        threadTweets[lastIdx] += tagStr;
+                    }
+                }
+            }
+
+            result.repurposed.single_tweet = { text: tweet, char_count: tweet.length };
+            if (threadTweets.length > 1) {
+                result.repurposed.thread = threadTweets.map((t, i) => ({
+                    tweet_number: i + 1,
+                    text: threadTweets.length > 1 ? `${i + 1}/${threadTweets.length} ${t}` : t,
+                    char_count: t.length + (threadTweets.length > 1 ? `${i + 1}/${threadTweets.length} `.length : 0),
+                }));
+            }
+            result.repurposed.recommendation = threadTweets.length > 3
+                ? "Use the thread format — this content is too rich for a single tweet."
+                : "Single tweet recommended. Thread available if you want more detail.";
+
+        } else if (from === "twitter" && to === "linkedin") {
+            // Twitter → LinkedIn: expand into professional long-form
+            const tweetText = text.replace(/@\w+/g, "").replace(/https?:\/\/\S+/g, "").trim();
+
+            // Detect tone
+            const detectedTone = tone || "professional";
+
+            let post = "";
+            switch (detectedTone) {
+                case "thought_leader":
+                    post = `${tweetText}\n\nHere's what most people miss about this:\n\n` +
+                        `The key insight is that this matters more than we think.\n\n` +
+                        `What's your take on this? I'd love to hear different perspectives.`;
+                    break;
+                case "storytelling":
+                    post = `Something caught my attention today.\n\n${tweetText}\n\n` +
+                        `And it made me reflect on how this connects to the bigger picture.\n\n` +
+                        `The lesson? Sometimes the simplest observations lead to the deepest insights.`;
+                    break;
+                case "casual":
+                    post = `${tweetText}\n\nThoughts? 👇`;
+                    break;
+                case "professional":
+                default:
+                    post = `${tweetText}\n\nThis is an important point that deserves more attention.\n\n` +
+                        `What are your thoughts on this?`;
+                    break;
+            }
+
+            // Add LinkedIn-style hashtags
+            if (hashtagsEnabled) {
+                const tags = extractHashtags(text, "linkedin");
+                if (tags.length > 0) {
+                    post += "\n\n" + tags.slice(0, 5).join(" ");
+                }
+            }
+
+            result.repurposed.post = { text: post, char_count: post.length };
+            result.repurposed.tone = detectedTone;
+            result.repurposed.tip = "LinkedIn posts perform best when they tell a story or share a personal insight. Consider adding 1-2 lines about your personal experience with this topic.";
+        }
+
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+function extractHashtags(text: string, platform: "linkedin" | "twitter"): string[] {
+    // Extract existing hashtags
+    const existing = (text.match(/#\w+/g) || []).map(h => h.toLowerCase());
+
+    // Extract key terms for new hashtags
+    const words = text.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter(w => w.length > 4);
+
+    const commonWords = new Set(["about", "would", "could", "should", "their", "there", "which", "being", "these", "those", "other", "after", "before", "every", "never", "always", "really", "think", "people", "things"]);
+    const keywords = words.filter(w => !commonWords.has(w));
+
+    // Count frequency
+    const freq: Record<string, number> = {};
+    for (const w of keywords) freq[w] = (freq[w] || 0) + 1;
+
+    const topWords = Object.entries(freq)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([w]) => `#${w}`);
+
+    const allTags = [...new Set([...existing, ...topWords])];
+
+    if (platform === "twitter") {
+        return allTags.slice(0, 3); // Twitter: fewer hashtags
+    }
+    return allTags.slice(0, 5); // LinkedIn: more hashtags OK
+}
+
+// ── Cross-Platform Workflows ──────────────────────────────────────────────────
+
+server.tool(
+    "meeting_prep",
+    `Prepare for a meeting by pulling LinkedIn profiles of all attendees from a Google Calendar event. Returns attendee names, roles, companies, headlines, and profile URLs so you're fully briefed before any call.`,
+    {
+        event_id: z.string().describe("Google Calendar event ID"),
+        calendar_id: z.string().optional().describe("Calendar ID (default: primary)"),
+        gcal_profile: z.string().optional().describe("Google Calendar credential profile"),
+        linkedin_profile: z.string().optional().describe("LinkedIn credential profile"),
+    },
+    async ({ event_id, calendar_id, gcal_profile, linkedin_profile }) => {
+        // Get event details from GCal
+        const gcalAuth = await getGCalAuth(gcal_profile);
+        const event = await gcal.getEvent(gcalAuth, calendar_id || "primary", event_id);
+
+        const attendees = event.attendees || [];
+        if (attendees.length === 0) {
+            return { content: [{ type: "text", text: json({ event: { summary: event.summary, start: event.start, end: event.end }, attendees: [], note: "No attendees found on this event." }) }] };
+        }
+
+        const linkedinAuth = getLinkedInAuth(linkedin_profile);
+        const profiles: any[] = [];
+
+        for (const attendee of attendees) {
+            const email = attendee.email || "";
+            const name = attendee.displayName || email.split("@")[0];
+            const profile: any = { email, name, responseStatus: attendee.responseStatus };
+
+            // Try to find on LinkedIn by name
+            if (name && name !== email) {
+                try {
+                    const searchResults = await linkedin.searchPeople(linkedinAuth, name, 3);
+                    if (searchResults.length > 0) {
+                        const best = searchResults[0];
+                        profile.linkedin = {
+                            name: `${best.firstName || ""} ${best.lastName || ""}`.trim(),
+                            headline: best.headline,
+                            location: best.location,
+                            profileUrl: best.publicId ? `https://www.linkedin.com/in/${best.publicId}` : null,
+                        };
+                    }
+                } catch {}
+            }
+            profiles.push(profile);
+        }
+
+        return {
+            content: [{
+                type: "text",
+                text: json({
+                    event: { summary: event.summary, start: event.start, end: event.end, location: event.location, description: event.description },
+                    attendee_count: profiles.length,
+                    attendees: profiles,
+                }),
+            }],
+        };
+    }
+);
+
+server.tool(
+    "smart_inbox",
+    `Unified notification inbox across all connected platforms. Returns a single view of what needs your attention: GitHub PRs/issues, LinkedIn messages, Slack DMs, Gmail unreads, and upcoming calendar events.`,
+    {
+        github_profile: z.string().optional(),
+        linkedin_profile: z.string().optional(),
+        gcal_profile: z.string().optional(),
+        gmail_profile: z.string().optional(),
+    },
+    async ({ github_profile, linkedin_profile, gcal_profile, gmail_profile }) => {
+        const inbox: any = { timestamp: new Date().toISOString(), sections: {} };
+
+        // GitHub notifications
+        try {
+            const ghAuth = getGitHubAuth(github_profile);
+            const notifications = await github.getNotifications(ghAuth, 10, false);
+            inbox.sections.github = {
+                count: notifications.length,
+                items: notifications.map((n: any) => ({
+                    reason: n.reason,
+                    title: n.subject?.title,
+                    type: n.subject?.type,
+                    repo: n.repository?.full_name,
+                    updated_at: n.updated_at,
+                    url: n.subject?.url,
+                })),
+            };
+        } catch (e: any) {
+            inbox.sections.github = { error: e.message, hint: "Run: store_credential('github', 'token', 'ghp_...') or install gh CLI" };
+        }
+
+        // LinkedIn messages
+        try {
+            const liAuth = getLinkedInAuth(linkedin_profile);
+            const convos = await linkedin.getConversations(liAuth, 5);
+            const unread = (convos.conversations || []).filter((c: any) => c.unreadCount > 0);
+            inbox.sections.linkedin = {
+                unread_conversations: unread.length,
+                items: unread.map((c: any) => ({
+                    from: c.participants?.map((p: any) => p.name).join(", "),
+                    preview: c.lastMessage?.slice(0, 100),
+                    unread: c.unreadCount,
+                })),
+            };
+        } catch (e: any) {
+            inbox.sections.linkedin = { error: e.message };
+        }
+
+        // Google Calendar (next 5 events today)
+        try {
+            const calAuth = await getGCalAuth(gcal_profile);
+            const now = new Date();
+            const endOfDay = new Date(now);
+            endOfDay.setHours(23, 59, 59, 999);
+            const events = await gcal.listEvents(calAuth, "primary", {
+                timeMin: now.toISOString(),
+                timeMax: endOfDay.toISOString(),
+                maxResults: 5,
+            });
+            inbox.sections.calendar = {
+                remaining_today: events.length,
+                items: events.map((e: any) => ({
+                    summary: e.summary,
+                    start: e.start?.dateTime || e.start?.date,
+                    end: e.end?.dateTime || e.end?.date,
+                    attendees: e.attendees?.length || 0,
+                    meet_link: e.hangoutLink,
+                })),
+            };
+        } catch (e: any) {
+            inbox.sections.calendar = { error: e.message };
+        }
+
+        // Gmail unreads
+        try {
+            const gmailAuth = await getGmailAuth(gmail_profile);
+            const result = await gmail.listMessages(gmailAuth, { query: "is:unread", maxResults: 10 });
+            const messages = result.messages || [];
+            inbox.sections.gmail = {
+                unread_count: messages.length,
+                items: messages.map((m: any) => ({
+                    from: m.from,
+                    subject: m.subject,
+                    snippet: m.snippet,
+                    date: m.date,
+                })),
+            };
+        } catch (e: any) {
+            inbox.sections.gmail = { error: e.message };
+        }
+
+        return { content: [{ type: "text", text: json(inbox) }] };
+    }
+);
+
+server.tool(
+    "contact_enrich",
+    `Enrich a contact by searching across LinkedIn, Twitter, GitHub, and Notion. Given a name or email, returns all matching profiles with roles, bios, and links.`,
+    {
+        name: z.string().optional().describe("Person's name to search for"),
+        email: z.string().optional().describe("Person's email to search for"),
+        linkedin_profile: z.string().optional(),
+    },
+    async ({ name, email, linkedin_profile }) => {
+        if (!name && !email) {
+            return { content: [{ type: "text", text: "Provide at least a name or email to search." }] };
+        }
+
+        const searchTerm = name || (email ? email.split("@")[0].replace(/[._]/g, " ") : "");
+        const result: any = { query: { name, email }, profiles: {} };
+
+        // LinkedIn
+        try {
+            const liAuth = getLinkedInAuth(linkedin_profile);
+            const people = await linkedin.searchPeople(liAuth, searchTerm, 5);
+            result.profiles.linkedin = people.map((p: any) => ({
+                name: `${p.firstName || ""} ${p.lastName || ""}`.trim(),
+                headline: p.headline,
+                location: p.location,
+                profileUrl: p.publicId ? `https://www.linkedin.com/in/${p.publicId}` : null,
+            }));
+        } catch (e: any) {
+            result.profiles.linkedin = { error: e.message };
+        }
+
+        // Twitter
+        try {
+            const twAuth = getTwitterAuth();
+            const tweets = await twitter.searchTweets(twAuth, searchTerm, 5);
+            const authors = new Map<string, any>();
+            for (const t of tweets) {
+                if (t.author && !authors.has(t.author)) {
+                    authors.set(t.author, { screen_name: t.author, name: t.authorName });
+                }
+            }
+            result.profiles.twitter = [...authors.values()].slice(0, 3);
+        } catch (e: any) {
+            result.profiles.twitter = { error: e.message };
+        }
+
+        // GitHub
+        try {
+            const ghAuth = getGitHubAuth();
+            const users = await github.searchUsers(ghAuth, searchTerm, 5);
+            result.profiles.github = users.map((u: any) => ({
+                login: u.login,
+                name: u.name,
+                bio: u.bio,
+                company: u.company,
+                location: u.location,
+                profileUrl: u.html_url,
+                repos: u.public_repos,
+                followers: u.followers,
+            }));
+        } catch (e: any) {
+            result.profiles.github = { error: e.message };
+        }
+
+        // Notion (search for name in pages)
+        try {
+            const notionAuth = getNotionAuth();
+            const pages = await notion.search(notionAuth, searchTerm, { limit: 3 });
+            if (pages.length > 0) {
+                result.profiles.notion = pages.map((p: any) => ({
+                    title: p.title,
+                    url: p.url,
+                    type: p.type,
+                }));
+            }
+        } catch {
+            // Notion not connected — skip silently
+        }
+
+        return { content: [{ type: "text", text: json(result) }] };
+    }
+);
+
+server.tool(
+    "content_calendar",
+    `Manage a cross-platform content calendar. Store draft posts, schedule them via Google Calendar, and track what's been published. Uses a 'content_calendar' collection to persist drafts.`,
+    {
+        action: z.enum(["create_draft", "list_drafts", "schedule", "list_scheduled", "mark_published"]).describe("Action to perform"),
+        text: z.string().optional().describe("Post content (for create_draft)"),
+        platform: z.enum(["linkedin", "twitter", "both"]).optional().describe("Target platform (for create_draft)"),
+        draft_id: z.number().optional().describe("Draft ID (for schedule/mark_published)"),
+        schedule_time: z.string().optional().describe("ISO 8601 datetime to schedule (for schedule action)"),
+        gcal_profile: z.string().optional(),
+    },
+    async ({ action, text, platform, draft_id, schedule_time, gcal_profile }) => {
+        // Ensure collection exists
+        const collectionName = "content_calendar";
+        try {
+            await db.createCollection(collectionName, "Cross-platform content calendar drafts", [
+                { name: "text", type: "text" },
+                { name: "platform", type: "text" },
+                { name: "status", type: "text" },
+                { name: "scheduled_at", type: "text" },
+                { name: "published_at", type: "text" },
+                { name: "cal_event_id", type: "text" },
+            ]);
+        } catch {} // Already exists
+
+        if (action === "create_draft") {
+            if (!text) return { content: [{ type: "text", text: "Provide text for the draft." }] };
+            const { id } = db.collectionInsert(collectionName, {
+                text,
+                platform: platform || "both",
+                status: "draft",
+                scheduled_at: "",
+                published_at: "",
+                cal_event_id: "",
+            });
+            return { content: [{ type: "text", text: json({ id, status: "draft", platform: platform || "both", text: text.slice(0, 100) + "..." }) }] };
+        }
+
+        if (action === "list_drafts") {
+            const drafts = db.collectionQuery(collectionName, { where: { status: "draft" } });
+            return { content: [{ type: "text", text: json(drafts) }] };
+        }
+
+        if (action === "schedule") {
+            if (!draft_id || !schedule_time) return { content: [{ type: "text", text: "Provide draft_id and schedule_time." }] };
+            // Create a GCal event as a reminder
+            try {
+                const calAuth = await getGCalAuth(gcal_profile);
+                const drafts = db.collectionQuery(collectionName, { where: { id: draft_id } } as any);
+                const draft = (drafts as any)[0] || drafts;
+                const draftText = (draft as any)?.text || "Content post";
+                const startTime = new Date(schedule_time);
+                const endTime = new Date(startTime.getTime() + 15 * 60 * 1000); // 15 min reminder
+                const event = await gcal.createEvent(calAuth, "primary", {
+                    summary: `📝 Post: ${draftText.slice(0, 50)}...`,
+                    description: `Platform: ${(draft as any)?.platform || "both"}\n\nFull text:\n${draftText}`,
+                    start: startTime.toISOString(),
+                    end: endTime.toISOString(),
+                });
+                db.collectionUpdate(collectionName, draft_id, { status: "scheduled", scheduled_at: schedule_time, cal_event_id: event.id || "" });
+                return { content: [{ type: "text", text: json({ draft_id, status: "scheduled", scheduled_at: schedule_time, cal_event_id: event.id }) }] };
+            } catch (e: any) {
+                // Schedule without GCal
+                db.collectionUpdate(collectionName, draft_id, { status: "scheduled", scheduled_at: schedule_time });
+                return { content: [{ type: "text", text: json({ draft_id, status: "scheduled", scheduled_at: schedule_time, note: `GCal: ${e.message}` }) }] };
+            }
+        }
+
+        if (action === "list_scheduled") {
+            const scheduled = db.collectionQuery(collectionName, { where: { status: "scheduled" } });
+            return { content: [{ type: "text", text: json(scheduled) }] };
+        }
+
+        if (action === "mark_published") {
+            if (!draft_id) return { content: [{ type: "text", text: "Provide draft_id." }] };
+            db.collectionUpdate(collectionName, draft_id, { status: "published", published_at: new Date().toISOString() });
+            return { content: [{ type: "text", text: json({ draft_id, status: "published", published_at: new Date().toISOString() }) }] };
+        }
+
+        return { content: [{ type: "text", text: "Unknown action." }] };
+    }
+);
+
+server.tool(
+    "pr_digest",
+    `Get a digest of your GitHub activity: open PRs needing review, your PRs with pending reviews, failing CI, and recent issues. Optionally post a summary to a Slack channel.`,
+    {
+        github_profile: z.string().optional(),
+        slack_profile: z.string().optional(),
+        slack_channel: z.string().optional().describe("Slack channel to post digest to (optional)"),
+        repos: z.array(z.string()).optional().describe("List of owner/repo to check (default: your recent repos)"),
+    },
+    async ({ github_profile, slack_profile, slack_channel, repos }) => {
+        const ghAuth = getGitHubAuth(github_profile);
+        const digest: any = { timestamp: new Date().toISOString(), sections: {} };
+
+        // Determine repos to check
+        let repoList = repos || [];
+        if (repoList.length === 0) {
+            try {
+                const myRepos = await github.listMyRepos(ghAuth, 10, "pushed");
+                repoList = myRepos.map((r: any) => r.name);
+            } catch {}
+        }
+
+        // GitHub notifications (PR reviews, mentions)
+        try {
+            const notifications = await github.getNotifications(ghAuth, 20, false);
+            const prNotifications = notifications.filter((n: any) => n.subject?.type === "PullRequest");
+            digest.sections.review_requests = {
+                count: prNotifications.length,
+                items: prNotifications.slice(0, 10).map((n: any) => ({
+                    title: n.subject?.title,
+                    repo: n.repository?.full_name,
+                    reason: n.reason,
+                    updated_at: n.updated_at,
+                })),
+            };
+        } catch (e: any) {
+            digest.sections.review_requests = { error: e.message };
+        }
+
+        // Open PRs across repos
+        const allPRs: any[] = [];
+        for (const repo of repoList.slice(0, 5)) {
+            const [owner, name] = repo.includes("/") ? repo.split("/") : ["", repo];
+            try {
+                const ownerName = owner || (await github.getAuthenticatedUser(ghAuth)).login;
+                const prs = await github.listPRs(ghAuth, ownerName, name, { state: "open", count: 10 });
+                for (const pr of prs) {
+                    allPRs.push({
+                        repo: `${ownerName}/${name}`,
+                        number: pr.number,
+                        title: pr.title,
+                        author: pr.user?.login,
+                        created_at: pr.created_at,
+                        draft: pr.draft,
+                        reviews: pr.requested_reviewers?.length || 0,
+                    });
+                }
+            } catch {}
+        }
+        digest.sections.open_prs = { count: allPRs.length, items: allPRs };
+
+        // Recent workflow runs (CI status)
+        const failedRuns: any[] = [];
+        for (const repo of repoList.slice(0, 5)) {
+            const [owner, name] = repo.includes("/") ? repo.split("/") : ["", repo];
+            try {
+                const ownerName = owner || (await github.getAuthenticatedUser(ghAuth)).login;
+                const runs = await github.listWorkflowRuns(ghAuth, ownerName, name, 5);
+                const failed = runs.filter((r: any) => r.conclusion === "failure");
+                for (const r of failed) {
+                    failedRuns.push({
+                        repo: `${ownerName}/${name}`,
+                        workflow: r.name,
+                        branch: r.head_branch,
+                        status: r.conclusion,
+                        url: r.html_url,
+                    });
+                }
+            } catch {}
+        }
+        digest.sections.failed_ci = { count: failedRuns.length, items: failedRuns };
+
+        // Post to Slack if requested
+        if (slack_channel) {
+            try {
+                const slackAuth = getSlackAuth(slack_profile);
+                const lines = [`*🔔 PR Digest — ${new Date().toLocaleDateString()}*`];
+                if (allPRs.length > 0) {
+                    lines.push(`\n*Open PRs (${allPRs.length}):*`);
+                    for (const pr of allPRs.slice(0, 5)) {
+                        lines.push(`• ${pr.repo}#${pr.number}: ${pr.title} (by ${pr.author})`);
+                    }
+                }
+                if (failedRuns.length > 0) {
+                    lines.push(`\n*❌ Failed CI (${failedRuns.length}):*`);
+                    for (const r of failedRuns.slice(0, 5)) {
+                        lines.push(`• ${r.repo}: ${r.workflow} on ${r.branch}`);
+                    }
+                }
+                await slack.postMessage(slackAuth, slack_channel, lines.join("\n"));
+                digest.slack_posted = true;
+            } catch (e: any) {
+                digest.slack_posted = false;
+                digest.slack_error = e.message;
+            }
+        }
+
+        return { content: [{ type: "text", text: json(digest) }] };
+    }
+);
+
 // ── Dynamic Tools (AI creates its own integrations) ──────────────────────────
 
 /**
@@ -1089,6 +2094,425 @@ server.tool(
     }
 );
 
+// ── Universal API Discovery ──────────────────────────────────────────────────
+
+server.tool(
+    "discover_api",
+    `Discover a website's internal API by navigating to it and capturing network requests. This automates the API discovery workflow:
+1. Extracts auth tokens from the target site
+2. Starts network capture and navigates to the specified URL
+3. Waits for API requests to load
+4. Returns all captured API endpoints with their methods, URLs, status codes, and headers
+5. Suggests which endpoints are useful and how to call them
+
+Use this as the first step when building a new integration for ANY website.`,
+    {
+        url: z.string().describe("The URL to navigate to and discover APIs from (e.g. 'https://app.example.com/dashboard')"),
+        service: z.string().optional().describe("Service name for auth extraction (e.g. 'example.com'). Auto-detected from URL if omitted."),
+        filters: z.array(z.string()).optional().describe("URL substrings to capture (e.g. ['api.', 'graphql']). Empty captures all requests."),
+        wait_seconds: z.number().optional().describe("How long to wait for API requests (default: 5s, max: 15s)"),
+    },
+    async ({ url, service, filters, wait_seconds }) => {
+        if (!isBridgeConnected()) {
+            return { content: [{ type: "text", text: "Browser extension not connected. Install the Neo Bridge extension and make sure Chrome is running." }] };
+        }
+
+        const results: string[] = [];
+        const domain = service || new URL(url).hostname;
+
+        // Step 1: Extract auth
+        results.push(`## Step 1: Extracting auth from ${domain}...`);
+        try {
+            const authResult = await browserCommand("extract_auth", { service: domain });
+            const storageKey = domain;
+            const creds: Record<string, string> = {};
+            for (const [key, value] of Object.entries(authResult)) {
+                if (key === "service" || !value || typeof value !== "string") continue;
+                creds[key] = value as string;
+                try { db.storeCredential(storageKey, key, value as string); } catch {}
+            }
+            if (Array.isArray(authResult.cookies) && authResult.cookies.length > 0) {
+                const cookieHeader = authResult.cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
+                creds._cookies = cookieHeader;
+                try { db.storeCredential(storageKey, "_cookies", cookieHeader); } catch {}
+            }
+            storeAuthInMemory(storageKey, creds);
+            const tokenKeys = Object.keys(creds).filter(k => !k.startsWith("_"));
+            results.push(`✅ Auth extracted. Tokens: ${tokenKeys.join(", ") || "cookies only"}`);
+        } catch (err: any) {
+            results.push(`⚠️ Auth extraction failed: ${err.message}. Continuing anyway...`);
+        }
+
+        // Step 2: Start network capture and navigate
+        results.push(`\n## Step 2: Capturing network requests from ${url}...`);
+        await browserCommand("network_start_capture", { filters: filters || [] });
+        await browserCommand("navigate", { url });
+
+        // Step 3: Wait for requests
+        const waitMs = Math.min((wait_seconds || 5), 15) * 1000;
+        await new Promise(r => setTimeout(r, waitMs));
+
+        // Step 4: Collect captured requests
+        const captureData = await browserCommand("network_list", { filter: undefined, limit: 200 });
+        const requests = captureData?.requests || [];
+
+        // Stop capture
+        await browserCommand("network_stop_capture");
+
+        if (requests.length === 0) {
+            results.push("❌ No network requests captured. The page may not have loaded, or try adding more specific filters.");
+            return { content: [{ type: "text", text: results.join("\n") }] };
+        }
+
+        results.push(`✅ Captured ${requests.length} requests.\n`);
+
+        // Step 5: Categorize requests
+        const apiRequests = requests.filter((r: any) => {
+            const u = (r.url || "").toLowerCase();
+            const isAsset = u.endsWith(".js") || u.endsWith(".css") || u.endsWith(".png") || u.endsWith(".jpg") ||
+                u.endsWith(".svg") || u.endsWith(".woff2") || u.endsWith(".woff") || u.endsWith(".ico") ||
+                u.includes("/static/") || u.includes("/assets/") || u.includes("/_next/static/");
+            return !isAsset;
+        });
+
+        const dataRequests = apiRequests.filter((r: any) => {
+            const u = (r.url || "").toLowerCase();
+            return u.includes("api") || u.includes("graphql") || u.includes("/v1/") || u.includes("/v2/") ||
+                u.includes("/v3/") || u.includes("json") || u.includes("rpc") || u.includes("query") ||
+                (r.method && r.method !== "GET");
+        });
+
+        results.push("## API Endpoints Discovered\n");
+        results.push("### High-confidence API calls:");
+        if (dataRequests.length > 0) {
+            for (const r of dataRequests.slice(0, 30)) {
+                results.push(`  [${r.id}] ${r.method || "GET"} ${r.status || "?"} ${r.url}`);
+            }
+        } else {
+            results.push("  (none detected — check 'Other requests' below)");
+        }
+
+        const otherRequests = apiRequests.filter((r: any) => !dataRequests.includes(r));
+        if (otherRequests.length > 0) {
+            results.push(`\n### Other requests (${otherRequests.length}):`);
+            for (const r of otherRequests.slice(0, 20)) {
+                results.push(`  [${r.id}] ${r.method || "GET"} ${r.status || "?"} ${r.url}`);
+            }
+        }
+
+        results.push(`\n## Next Steps`);
+        results.push(`1. Use network_request_detail(id) to inspect any interesting request's full headers and response`);
+        results.push(`2. Use authenticated_fetch() to replay the request and verify it works`);
+        results.push(`3. Use create_tool() to save it as a permanent tool`);
+        results.push(`\nAuth tokens stored under service "${domain}" — use helpers.credentials("${domain}") in create_tool code.`);
+
+        return { content: [{ type: "text", text: results.join("\n") }] };
+    }
+);
+
+// ── Web Scrape (structured data extraction) ──────────────────────────────────
+
+server.tool(
+    "web_scrape",
+    `Extract structured data from any URL. Returns clean, parsed content instead of raw HTML. Extracts: page title, meta description, main text content, all links, tables (as arrays), images, OpenGraph/meta tags, and JSON-LD structured data. Use this instead of authenticated_fetch when you need usable data from a page.`,
+    {
+        url: z.string().describe("URL to scrape"),
+        extract: z.array(z.enum(["text", "links", "tables", "images", "meta", "structured_data", "all"])).optional()
+            .describe("What to extract (default: all)"),
+        selector: z.string().optional().describe("CSS selector to scope extraction (e.g. 'article', '.content', '#main')"),
+    },
+    async ({ url, extract, selector }) => {
+        if (!isBridgeConnected()) {
+            return { content: [{ type: "text", text: "Browser extension not connected." }] };
+        }
+
+        // Navigate and get page content via browser
+        await browserCommand("navigate", { url });
+        await new Promise(r => setTimeout(r, 3000)); // Wait for page load
+
+        const extractAll = !extract || extract.includes("all");
+        const wants = (t: string) => extractAll || extract?.includes(t as any);
+
+        // Execute extraction script in the browser
+        const script = `
+        (function() {
+            const scope = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : 'document'} || document;
+            const result = {};
+
+            // Title & meta
+            result.url = window.location.href;
+            result.title = document.title || '';
+
+            ${wants("meta") || wants("text") ? `
+            // Meta tags
+            const metaDesc = document.querySelector('meta[name="description"]');
+            result.meta = {
+                description: metaDesc ? metaDesc.content : '',
+                og: {},
+            };
+            document.querySelectorAll('meta[property^="og:"]').forEach(m => {
+                const key = m.getAttribute('property').replace('og:', '');
+                result.meta.og[key] = m.content;
+            });
+            document.querySelectorAll('meta[name^="twitter:"]').forEach(m => {
+                const key = m.getAttribute('name').replace('twitter:', '');
+                result.meta['twitter_' + key] = m.content;
+            });
+            const canonical = document.querySelector('link[rel="canonical"]');
+            if (canonical) result.meta.canonical = canonical.href;
+            ` : ''}
+
+            ${wants("text") ? `
+            // Main text content — try article/main first, fall back to body
+            const contentEl = scope.querySelector('article') || scope.querySelector('[role="main"]') || scope.querySelector('main') || scope.querySelector('.content') || scope.querySelector('#content') || scope;
+            // Remove scripts, styles, nav, footer, header, ads
+            const clone = contentEl.cloneNode(true);
+            clone.querySelectorAll('script, style, nav, footer, header, aside, .ad, .ads, .advertisement, [role="navigation"], [role="banner"], [role="contentinfo"]').forEach(el => el.remove());
+            const textContent = clone.innerText || clone.textContent || '';
+            // Clean up whitespace
+            result.text = textContent.replace(/\\n{3,}/g, '\\n\\n').replace(/[ \\t]+/g, ' ').trim().slice(0, 50000);
+            result.text_length = result.text.length;
+            result.word_count = result.text.split(/\\s+/).filter(w => w).length;
+            ` : ''}
+
+            ${wants("links") ? `
+            // Links
+            const links = [];
+            scope.querySelectorAll('a[href]').forEach(a => {
+                const href = a.href;
+                const text = (a.innerText || '').trim().slice(0, 200);
+                if (href && !href.startsWith('javascript:') && text) {
+                    links.push({ text, href });
+                }
+            });
+            // Deduplicate by href
+            const seen = new Set();
+            result.links = links.filter(l => { if (seen.has(l.href)) return false; seen.add(l.href); return true; }).slice(0, 200);
+            result.link_count = result.links.length;
+            ` : ''}
+
+            ${wants("tables") ? `
+            // Tables
+            result.tables = [];
+            scope.querySelectorAll('table').forEach((table, idx) => {
+                const rows = [];
+                table.querySelectorAll('tr').forEach(tr => {
+                    const cells = [];
+                    tr.querySelectorAll('th, td').forEach(td => {
+                        cells.push((td.innerText || '').trim());
+                    });
+                    if (cells.length > 0) rows.push(cells);
+                });
+                if (rows.length > 0) {
+                    result.tables.push({ index: idx, headers: rows[0], rows: rows.slice(1, 100) });
+                }
+            });
+            ` : ''}
+
+            ${wants("images") ? `
+            // Images
+            result.images = [];
+            scope.querySelectorAll('img[src]').forEach(img => {
+                const src = img.src;
+                const alt = img.alt || '';
+                const w = img.naturalWidth || img.width;
+                const h = img.naturalHeight || img.height;
+                if (src && w > 50 && h > 50) { // Skip tiny icons
+                    result.images.push({ src, alt, width: w, height: h });
+                }
+            });
+            result.images = result.images.slice(0, 50);
+            ` : ''}
+
+            ${wants("structured_data") ? `
+            // JSON-LD structured data
+            result.structured_data = [];
+            document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
+                try { result.structured_data.push(JSON.parse(s.textContent)); } catch {}
+            });
+            ` : ''}
+
+            return result;
+        })()
+        `;
+
+        try {
+            const data = await browserCommand("execute_script", { code: script });
+            return { content: [{ type: "text", text: json(data) }] };
+        } catch (err: any) {
+            // Fallback: try getting page text via simpler method
+            try {
+                const textScript = `({ url: window.location.href, title: document.title, text: document.body.innerText.slice(0, 30000) })`;
+                const fallback = await browserCommand("execute_script", { code: textScript });
+                return { content: [{ type: "text", text: json({ ...fallback, note: "Partial extraction (full script failed)" }) }] };
+            } catch {
+                return { content: [{ type: "text", text: `Scrape failed: ${err.message}` }] };
+            }
+        }
+    }
+);
+
+// ── Diff Monitor (watch anything for changes) ────────────────────────────────
+
+server.tool(
+    "diff_monitor",
+    `Monitor any URL or API endpoint for changes. Stores snapshots in a collection, compares against the previous snapshot, and reports what changed. Use for: price tracking, job posting changes, competitor monitoring, stock availability, or any "tell me when X changes" request.`,
+    {
+        action: z.enum(["check", "list", "history", "remove"]).describe("check: take snapshot & compare, list: show all monitors, history: show snapshots for a monitor, remove: stop monitoring"),
+        url: z.string().optional().describe("URL to monitor (for check action)"),
+        name: z.string().optional().describe("Friendly name for this monitor (for check/remove/history)"),
+        selector: z.string().optional().describe("CSS selector to monitor specific content (for check)"),
+        extract: z.enum(["text", "html", "json"]).optional().describe("What to extract: text (default), html, or json (for API endpoints)"),
+    },
+    async ({ action, url, name, selector, extract }) => {
+        const COLLECTION = "diff_monitor";
+
+        // Ensure collection exists
+        try {
+            db.createCollection(COLLECTION, "Page change monitoring snapshots", [
+                { name: "monitor_name", type: "text" },
+                { name: "url", type: "text" },
+                { name: "selector", type: "text" },
+                { name: "extract_type", type: "text" },
+                { name: "content_hash", type: "text" },
+                { name: "content", type: "text" },
+                { name: "checked_at", type: "text" },
+                { name: "changed", type: "boolean" },
+                { name: "diff_summary", type: "text" },
+            ]);
+        } catch {} // Already exists
+
+        if (action === "list") {
+            // Get unique monitors
+            const all = db.collectionQuery(COLLECTION, { orderBy: "checked_at DESC", limit: 200 }) as any[];
+            const monitors = new Map<string, any>();
+            for (const row of all) {
+                if (!monitors.has(row.monitor_name)) {
+                    monitors.set(row.monitor_name, {
+                        name: row.monitor_name,
+                        url: row.url,
+                        selector: row.selector || null,
+                        last_checked: row.checked_at,
+                        last_changed: row.changed ? row.checked_at : null,
+                        snapshot_count: 0,
+                    });
+                }
+                const m = monitors.get(row.monitor_name)!;
+                m.snapshot_count++;
+                if (row.changed && (!m.last_changed || row.checked_at > m.last_changed)) {
+                    m.last_changed = row.checked_at;
+                }
+            }
+            return { content: [{ type: "text", text: json([...monitors.values()]) }] };
+        }
+
+        if (action === "history") {
+            if (!name) return { content: [{ type: "text", text: "Provide a monitor name." }] };
+            const snapshots = db.collectionQuery(COLLECTION, { where: { monitor_name: name }, orderBy: "checked_at DESC", limit: 20 }) as any[];
+            return { content: [{ type: "text", text: json(snapshots.map(s => ({ checked_at: s.checked_at, changed: s.changed, diff_summary: s.diff_summary, content_preview: (s.content || "").slice(0, 200) }))) }] };
+        }
+
+        if (action === "remove") {
+            if (!name) return { content: [{ type: "text", text: "Provide a monitor name to remove." }] };
+            const rows = db.collectionQuery(COLLECTION, { where: { monitor_name: name } }) as any[];
+            let removed = 0;
+            for (const row of rows) {
+                try { db.collectionDelete(COLLECTION, row.id); removed++; } catch {}
+            }
+            return { content: [{ type: "text", text: `Removed monitor "${name}" (${removed} snapshots deleted).` }] };
+        }
+
+        // action === "check"
+        if (!url) return { content: [{ type: "text", text: "Provide a URL to monitor." }] };
+        const monitorName = name || new URL(url).hostname + new URL(url).pathname;
+        const extractType = extract || "text";
+
+        // Fetch current content
+        let currentContent = "";
+        try {
+            if (extractType === "json") {
+                // API endpoint — use authenticated_fetch
+                const result = await browserCommand("browser_fetch", { url, method: "GET", credentials: "include" });
+                currentContent = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
+            } else {
+                // Web page — navigate and extract
+                await browserCommand("navigate", { url });
+                await new Promise(r => setTimeout(r, 3000));
+
+                const script = selector
+                    ? `(document.querySelector(${JSON.stringify(selector)}) || document.body).${extractType === "html" ? "innerHTML" : "innerText"}`
+                    : `document.body.${extractType === "html" ? "innerHTML" : "innerText"}`;
+                currentContent = await browserCommand("execute_script", { code: script }) || "";
+                if (typeof currentContent !== "string") currentContent = JSON.stringify(currentContent);
+            }
+        } catch (err: any) {
+            return { content: [{ type: "text", text: `Failed to fetch ${url}: ${err.message}` }] };
+        }
+
+        // Simple content hash
+        let hash = 0;
+        for (let i = 0; i < currentContent.length; i++) {
+            hash = ((hash << 5) - hash + currentContent.charCodeAt(i)) | 0;
+        }
+        const contentHash = hash.toString(36);
+
+        // Get previous snapshot
+        const previous = (db.collectionQuery(COLLECTION, {
+            where: { monitor_name: monitorName },
+            orderBy: "checked_at DESC",
+            limit: 1,
+        }) as any[])[0];
+
+        let changed = true;
+        let diffSummary = "First snapshot — baseline recorded.";
+
+        if (previous) {
+            changed = previous.content_hash !== contentHash;
+            if (changed) {
+                // Generate diff summary
+                const prevLines = (previous.content || "").split("\\n");
+                const currLines = currentContent.split("\\n");
+                const added = currLines.filter((l: string) => !prevLines.includes(l)).slice(0, 10);
+                const removed = prevLines.filter((l: string) => !currLines.includes(l)).slice(0, 10);
+                const parts: string[] = [];
+                if (added.length > 0) parts.push(`Added (${added.length} lines): ${added.map((l: string) => l.slice(0, 80)).join(" | ")}`);
+                if (removed.length > 0) parts.push(`Removed (${removed.length} lines): ${removed.map((l: string) => l.slice(0, 80)).join(" | ")}`);
+                diffSummary = parts.join("\\n") || "Content changed (binary diff)";
+            } else {
+                diffSummary = "No changes detected.";
+            }
+        }
+
+        // Store snapshot (truncate content to 50KB to avoid DB bloat)
+        db.collectionInsert(COLLECTION, {
+            monitor_name: monitorName,
+            url,
+            selector: selector || "",
+            extract_type: extractType,
+            content_hash: contentHash,
+            content: currentContent.slice(0, 50000),
+            checked_at: new Date().toISOString(),
+            changed,
+            diff_summary: diffSummary,
+        });
+
+        return {
+            content: [{
+                type: "text",
+                text: json({
+                    monitor: monitorName,
+                    url,
+                    changed,
+                    diff_summary: diffSummary,
+                    content_preview: currentContent.slice(0, 500),
+                    checked_at: new Date().toISOString(),
+                    previous_check: previous?.checked_at || null,
+                }),
+            }],
+        };
+    }
+);
+
 server.tool(
     "list_custom_tools",
     "List all custom tools that have been created.",
@@ -1135,6 +2559,9 @@ async function main() {
     // Wire browser command into integrations so they route through the extension
     linkedin.setBrowserCommand(browserCommand);
     twitter.setBrowserCommand(browserCommand);
+    github.setBrowserCommand(browserCommand);
+    notion.setBrowserCommand(browserCommand);
+    discord.setBrowserCommand(browserCommand);
 
     // Load and register all saved custom tools (graceful — db may fail on Linux VM)
     try {
@@ -1236,6 +2663,58 @@ async function main() {
             } catch {}
             const label = profile !== "default" ? ` (profile: ${profile})` : "";
             res.send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Gmail Connected &#x2705;</h1><p style="color:#aaa">${email}${label}</p><p style="color:#666">You can close this tab.</p></div></body></html>`);
+        } catch (err: any) {
+            res.status(500).send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Auth Failed</h1><p style="color:#f66">${err.message}</p></div></body></html>`);
+        }
+    });
+
+    // ── Google Calendar OAuth ───────────────────────────────────────────────
+    app.get("/gcal/auth", (req: any, res: any) => {
+        const profile = req.query.profile || undefined;
+        const redirectUri = `http://localhost:${httpPort}/gcal/callback`;
+        const url = gcal.getOAuthUrl(redirectUri, profile);
+        res.redirect(url);
+    });
+
+    app.get("/gcal/callback", async (req: any, res: any) => {
+        const code = req.query.code as string;
+        const profile = (req.query.state as string) || "default";
+        if (!code) { res.status(400).send("Missing authorization code."); return; }
+        try {
+            const redirectUri = `http://localhost:${httpPort}/gcal/callback`;
+            const tokens = await gcal.exchangeCode(code, redirectUri);
+            const storageKey = profileKey("gcal", profile === "default" ? undefined : profile);
+            const creds: Record<string, string> = { refresh_token: tokens.refresh_token };
+            try { db.storeCredential(storageKey, "refresh_token", tokens.refresh_token); } catch {}
+            storeAuthInMemory(storageKey, creds);
+            const label = profile !== "default" ? ` (profile: ${profile})` : "";
+            res.send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Google Calendar Connected &#x2705;</h1><p style="color:#aaa">${label}</p><p style="color:#666">You can close this tab.</p></div></body></html>`);
+        } catch (err: any) {
+            res.status(500).send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Auth Failed</h1><p style="color:#f66">${err.message}</p></div></body></html>`);
+        }
+    });
+
+    // ── Google Drive OAuth ────────────────────────────────────────────────
+    app.get("/gdrive/auth", (req: any, res: any) => {
+        const profile = req.query.profile || undefined;
+        const redirectUri = `http://localhost:${httpPort}/gdrive/callback`;
+        const url = gdrive.getOAuthUrl(redirectUri, profile);
+        res.redirect(url);
+    });
+
+    app.get("/gdrive/callback", async (req: any, res: any) => {
+        const code = req.query.code as string;
+        const profile = (req.query.state as string) || "default";
+        if (!code) { res.status(400).send("Missing authorization code."); return; }
+        try {
+            const redirectUri = `http://localhost:${httpPort}/gdrive/callback`;
+            const tokens = await gdrive.exchangeCode(code, redirectUri);
+            const storageKey = profileKey("gdrive", profile === "default" ? undefined : profile);
+            const creds: Record<string, string> = { refresh_token: tokens.refresh_token };
+            try { db.storeCredential(storageKey, "refresh_token", tokens.refresh_token); } catch {}
+            storeAuthInMemory(storageKey, creds);
+            const label = profile !== "default" ? ` (profile: ${profile})` : "";
+            res.send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Google Drive Connected &#x2705;</h1><p style="color:#aaa">${label}</p><p style="color:#666">You can close this tab.</p></div></body></html>`);
         } catch (err: any) {
             res.status(500).send(`<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;background:#111;color:#fff"><div style="text-align:center"><h1>Auth Failed</h1><p style="color:#f66">${err.message}</p></div></body></html>`);
         }
@@ -1373,6 +2852,26 @@ function registerAllTools(s: McpServer) {
         async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.searchPeople(getLinkedInAuth(profile), query, count || 10)) }] }));
     s.tool("linkedin_connections", "List your LinkedIn connections.", { count: z.number().optional(), ...profileParam },
         async ({ count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getConnections(getLinkedInAuth(profile), count || 50)) }] }));
+    s.tool("linkedin_conversations", "List your recent LinkedIn message conversations.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getConversations(getLinkedInAuth(profile), count || 20)) }] }));
+    s.tool("linkedin_messages", "Get messages in a specific LinkedIn conversation.", { conversation_id: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ conversation_id, count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getConversationMessages(getLinkedInAuth(profile), conversation_id, count || 20)) }] }));
+    s.tool("linkedin_send_message", "Send a LinkedIn message.", { recipient: z.string(), message: z.string(), ...profileParam },
+        async ({ recipient, message, profile }) => ({ content: [{ type: "text", text: json(await linkedin.sendMessage(getLinkedInAuth(profile), recipient, message)) }] }));
+    s.tool("linkedin_react", "React to a LinkedIn post.", { post_urn: z.string(), reaction: z.enum(["LIKE", "CELEBRATE", "SUPPORT", "LOVE", "INSIGHTFUL", "FUNNY"]).optional(), ...profileParam },
+        async ({ post_urn, reaction, profile }) => ({ content: [{ type: "text", text: json(await linkedin.reactToPost(getLinkedInAuth(profile), post_urn, reaction || "LIKE")) }] }));
+    s.tool("linkedin_comment", "Comment on a LinkedIn post.", { post_urn: z.string(), text: z.string(), ...profileParam },
+        async ({ post_urn, text, profile }) => ({ content: [{ type: "text", text: json(await linkedin.commentOnPost(getLinkedInAuth(profile), post_urn, text)) }] }));
+    s.tool("linkedin_post_comments", "Get comments on a LinkedIn post.", { post_urn: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ post_urn, count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getPostComments(getLinkedInAuth(profile), post_urn, count || 20)) }] }));
+    s.tool("linkedin_notifications", "Get your recent LinkedIn notifications.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getNotifications(getLinkedInAuth(profile), count || 20)) }] }));
+    s.tool("linkedin_send_connection", "Send a connection request.", { vanity_name: z.string(), message: z.string().optional(), ...profileParam },
+        async ({ vanity_name, message, profile }) => ({ content: [{ type: "text", text: json(await linkedin.sendConnectionRequest(getLinkedInAuth(profile), vanity_name, message)) }] }));
+    s.tool("linkedin_invitations", "Get pending connection requests.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await linkedin.getInvitations(getLinkedInAuth(profile), count || 20)) }] }));
+    s.tool("linkedin_respond_invitation", "Accept or decline a connection request.", { invitation_id: z.string(), accept: z.boolean(), ...profileParam },
+        async ({ invitation_id, accept, profile }) => ({ content: [{ type: "text", text: json(await linkedin.respondToInvitation(getLinkedInAuth(profile), invitation_id, accept)) }] }));
 
     // Twitter
     s.tool("twitter_profile", "Get a Twitter/X user's profile.", { screen_name: z.string(), ...profileParam },
@@ -1385,6 +2884,186 @@ function registerAllTools(s: McpServer) {
         async ({ text, reply_to, profile }) => ({ content: [{ type: "text", text: json(await twitter.createTweet(getTwitterAuth(profile), text, reply_to)) }] }));
     s.tool("twitter_search", "Search tweets.", { query: z.string(), count: z.number().optional(), ...profileParam },
         async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await twitter.searchTweets(getTwitterAuth(profile), query, count || 20)) }] }));
+
+    // GitHub
+    s.tool("github_me", "Get your authenticated GitHub profile.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await github.getAuthenticatedUser(getGitHubAuth(profile))) }] }));
+    s.tool("github_user", "Get a GitHub user's profile.", { username: z.string(), ...profileParam },
+        async ({ username, profile }) => ({ content: [{ type: "text", text: json(await github.getUserProfile(getGitHubAuth(profile), username)) }] }));
+    s.tool("github_repos", "List your GitHub repos.", { count: z.number().optional(), sort: z.enum(["updated", "created", "pushed", "full_name"]).optional(), ...profileParam },
+        async ({ count, sort, profile }) => ({ content: [{ type: "text", text: json(await github.listMyRepos(getGitHubAuth(profile), count || 30, sort || "updated")) }] }));
+    s.tool("github_repo", "Get details about a GitHub repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+        async ({ owner, repo, profile }) => ({ content: [{ type: "text", text: json(await github.getRepo(getGitHubAuth(profile), owner, repo)) }] }));
+    s.tool("github_search_repos", "Search GitHub repositories.", { query: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchRepos(getGitHubAuth(profile), query, count || 20)) }] }));
+    s.tool("github_issues", "List issues for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), labels: z.string().optional(), count: z.number().optional(), ...profileParam },
+        async ({ owner, repo, state, labels, count, profile }) => ({ content: [{ type: "text", text: json(await github.listIssues(getGitHubAuth(profile), owner, repo, { state, labels, count })) }] }));
+    s.tool("github_issue", "Get a specific issue.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getIssue(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_create_issue", "Create a GitHub issue.", { owner: z.string(), repo: z.string(), title: z.string(), body: z.string().optional(), labels: z.array(z.string()).optional(), assignees: z.array(z.string()).optional(), ...profileParam },
+        async ({ owner, repo, title, body, labels, assignees, profile }) => ({ content: [{ type: "text", text: json(await github.createIssue(getGitHubAuth(profile), owner, repo, title, body, labels, assignees)) }] }));
+    s.tool("github_comment_issue", "Comment on a GitHub issue or PR.", { owner: z.string(), repo: z.string(), number: z.number(), body: z.string(), ...profileParam },
+        async ({ owner, repo, number, body, profile }) => ({ content: [{ type: "text", text: json(await github.commentOnIssue(getGitHubAuth(profile), owner, repo, number, body)) }] }));
+    s.tool("github_prs", "List pull requests for a repo.", { owner: z.string(), repo: z.string(), state: z.enum(["open", "closed", "all"]).optional(), count: z.number().optional(), ...profileParam },
+        async ({ owner, repo, state, count, profile }) => ({ content: [{ type: "text", text: json(await github.listPRs(getGitHubAuth(profile), owner, repo, { state, count })) }] }));
+    s.tool("github_pr", "Get details about a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPR(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_pr_files", "Get files changed in a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRFiles(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_create_pr", "Create a pull request.", { owner: z.string(), repo: z.string(), title: z.string(), head: z.string(), base: z.string(), body: z.string().optional(), draft: z.boolean().optional(), ...profileParam },
+        async ({ owner, repo, title, head, base, body, draft, profile }) => ({ content: [{ type: "text", text: json(await github.createPR(getGitHubAuth(profile), owner, repo, title, head, base, body, draft)) }] }));
+    s.tool("github_merge_pr", "Merge a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), method: z.enum(["merge", "squash", "rebase"]).optional(), commit_message: z.string().optional(), ...profileParam },
+        async ({ owner, repo, number, method, commit_message, profile }) => ({ content: [{ type: "text", text: json(await github.mergePR(getGitHubAuth(profile), owner, repo, number, method || "merge", commit_message)) }] }));
+    s.tool("github_pr_reviews", "Get reviews on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), ...profileParam },
+        async ({ owner, repo, number, profile }) => ({ content: [{ type: "text", text: json(await github.getPRReviews(getGitHubAuth(profile), owner, repo, number)) }] }));
+    s.tool("github_review_pr", "Submit a review on a pull request.", { owner: z.string(), repo: z.string(), number: z.number(), event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]), body: z.string().optional(), ...profileParam },
+        async ({ owner, repo, number, event, body, profile }) => ({ content: [{ type: "text", text: json(await github.createPRReview(getGitHubAuth(profile), owner, repo, number, event, body)) }] }));
+    s.tool("github_notifications", "Get your GitHub notifications.", { count: z.number().optional(), all: z.boolean().optional(), ...profileParam },
+        async ({ count, all, profile }) => ({ content: [{ type: "text", text: json(await github.getNotifications(getGitHubAuth(profile), count || 30, all || false)) }] }));
+    s.tool("github_mark_notification_read", "Mark a notification as read.", { thread_id: z.string(), ...profileParam },
+        async ({ thread_id, profile }) => { await github.markNotificationRead(getGitHubAuth(profile), thread_id); return { content: [{ type: "text", text: "Marked as read." }] }; });
+    s.tool("github_search_code", "Search code on GitHub.", { query: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchCode(getGitHubAuth(profile), query, count || 20)) }] }));
+    s.tool("github_search_users", "Search GitHub users.", { query: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ query, count, profile }) => ({ content: [{ type: "text", text: json(await github.searchUsers(getGitHubAuth(profile), query, count || 20)) }] }));
+    s.tool("github_starred", "List your starred repos.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listStarred(getGitHubAuth(profile), count || 30)) }] }));
+    s.tool("github_star", "Star a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+        async ({ owner, repo, profile }) => { await github.starRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Starred." }] }; });
+    s.tool("github_unstar", "Unstar a repo.", { owner: z.string(), repo: z.string(), ...profileParam },
+        async ({ owner, repo, profile }) => { await github.unstarRepo(getGitHubAuth(profile), owner, repo); return { content: [{ type: "text", text: "Unstarred." }] }; });
+    s.tool("github_gists", "List your gists.", { count: z.number().optional(), ...profileParam },
+        async ({ count, profile }) => ({ content: [{ type: "text", text: json(await github.listGists(getGitHubAuth(profile), count || 20)) }] }));
+    s.tool("github_create_gist", "Create a gist.", { files: z.record(z.string(), z.string()).describe("Filename → content map"), description: z.string().optional(), public: z.boolean().optional(), ...profileParam },
+        async ({ files, description, public: isPublic, profile }) => ({ content: [{ type: "text", text: json(await github.createGist(getGitHubAuth(profile), files, description, isPublic || false)) }] }));
+    s.tool("github_actions", "List recent workflow runs.", { owner: z.string(), repo: z.string(), count: z.number().optional(), ...profileParam },
+        async ({ owner, repo, count, profile }) => ({ content: [{ type: "text", text: json(await github.listWorkflowRuns(getGitHubAuth(profile), owner, repo, count || 10)) }] }));
+    s.tool("github_action_run", "Get details about a workflow run.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+        async ({ owner, repo, run_id, profile }) => ({ content: [{ type: "text", text: json(await github.getWorkflowRun(getGitHubAuth(profile), owner, repo, run_id)) }] }));
+    s.tool("github_rerun_workflow", "Re-run a failed workflow.", { owner: z.string(), repo: z.string(), run_id: z.number(), ...profileParam },
+        async ({ owner, repo, run_id, profile }) => { await github.rerunWorkflow(getGitHubAuth(profile), owner, repo, run_id); return { content: [{ type: "text", text: "Re-run triggered." }] }; });
+    s.tool("github_file", "Get file or directory contents from a repo.", { owner: z.string(), repo: z.string(), path: z.string(), ref: z.string().optional().describe("Branch, tag, or commit SHA"), ...profileParam },
+        async ({ owner, repo, path, ref, profile }) => ({ content: [{ type: "text", text: json(await github.getFileContent(getGitHubAuth(profile), owner, repo, path, ref)) }] }));
+
+    // Google Calendar
+    s.tool("gcal_connect", "Connect a Google Calendar account via OAuth.", { profile: z.string().optional() },
+        async ({ profile }) => {
+            const authUrl = `http://127.0.0.1:${httpPort}/gcal/auth${profile ? `?profile=${profile}` : ""}`;
+            try { await browserCommand("navigate", { url: authUrl }); } catch {}
+            const storageKey = profileKey("gcal", profile);
+            const deadline = Date.now() + 120000;
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 2000));
+                const creds = memCredentials.get(storageKey);
+                if (creds?.refresh_token) { return { content: [{ type: "text", text: `Google Calendar connected${profile ? ` as "${profile}"` : ""}.` }] }; }
+            }
+            return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+        });
+    s.tool("gcal_calendars", "List your Google Calendar calendars.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gcal.listCalendars(await getGCalAuth(profile))) }] }));
+    s.tool("gcal_events", "List upcoming calendar events.", { calendar_id: z.string().optional(), time_min: z.string().optional(), time_max: z.string().optional(), max_results: z.number().optional(), query: z.string().optional(), ...profileParam },
+        async ({ calendar_id, time_min, time_max, max_results, query, profile }) => ({ content: [{ type: "text", text: json(await gcal.listEvents(await getGCalAuth(profile), calendar_id || "primary", { timeMin: time_min, timeMax: time_max, maxResults: max_results, query })) }] }));
+    s.tool("gcal_event", "Get a specific calendar event.", { calendar_id: z.string().optional(), event_id: z.string(), ...profileParam },
+        async ({ calendar_id, event_id, profile }) => ({ content: [{ type: "text", text: json(await gcal.getEvent(await getGCalAuth(profile), calendar_id || "primary", event_id)) }] }));
+    s.tool("gcal_create_event", "Create a calendar event.", { summary: z.string(), description: z.string().optional(), location: z.string().optional(), start: z.string(), end: z.string(), attendees: z.array(z.string()).optional(), time_zone: z.string().optional(), calendar_id: z.string().optional(), recurrence: z.array(z.string()).optional(), add_meet: z.boolean().optional(), ...profileParam },
+        async ({ summary, description, location, start, end, attendees, time_zone, calendar_id, recurrence, add_meet, profile }) => ({ content: [{ type: "text", text: json(await gcal.createEvent(await getGCalAuth(profile), calendar_id || "primary", { summary, description, location, start, end, attendees, timeZone: time_zone, recurrence, conferenceData: add_meet })) }] }));
+    s.tool("gcal_update_event", "Update a calendar event.", { event_id: z.string(), calendar_id: z.string().optional(), summary: z.string().optional(), description: z.string().optional(), location: z.string().optional(), start: z.string().optional(), end: z.string().optional(), time_zone: z.string().optional(), ...profileParam },
+        async ({ event_id, calendar_id, summary, description, location, start, end, time_zone, profile }) => ({ content: [{ type: "text", text: json(await gcal.updateEvent(await getGCalAuth(profile), calendar_id || "primary", event_id, { summary, description, location, start, end, timeZone: time_zone })) }] }));
+    s.tool("gcal_delete_event", "Delete a calendar event.", { event_id: z.string(), calendar_id: z.string().optional(), ...profileParam },
+        async ({ event_id, calendar_id, profile }) => { await gcal.deleteEvent(await getGCalAuth(profile), calendar_id || "primary", event_id); return { content: [{ type: "text", text: "Event deleted." }] }; });
+    s.tool("gcal_respond", "Respond to a calendar invite.", { event_id: z.string(), response: z.enum(["accepted", "declined", "tentative"]), calendar_id: z.string().optional(), ...profileParam },
+        async ({ event_id, response, calendar_id, profile }) => ({ content: [{ type: "text", text: json(await gcal.respondToEvent(await getGCalAuth(profile), calendar_id || "primary", event_id, response)) }] }));
+    s.tool("gcal_quick_add", "Create an event from natural language text.", { text: z.string(), calendar_id: z.string().optional(), ...profileParam },
+        async ({ text, calendar_id, profile }) => ({ content: [{ type: "text", text: json(await gcal.quickAddEvent(await getGCalAuth(profile), calendar_id || "primary", text)) }] }));
+    s.tool("gcal_freebusy", "Check free/busy status for calendars.", { calendar_ids: z.array(z.string()).optional(), time_min: z.string(), time_max: z.string(), ...profileParam },
+        async ({ calendar_ids, time_min, time_max, profile }) => ({ content: [{ type: "text", text: json(await gcal.freeBusy(await getGCalAuth(profile), calendar_ids || ["primary"], time_min, time_max)) }] }));
+
+    // Notion
+    s.tool("notion_spaces", "List your Notion workspaces.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await notion.getSpaces(getNotionAuth(profile))) }] }));
+    s.tool("notion_search", "Search Notion pages and databases.", { query: z.string(), limit: z.number().optional(), type: z.string().optional(), ...profileParam },
+        async ({ query, limit, type, profile }) => ({ content: [{ type: "text", text: json(await notion.search(getNotionAuth(profile), query, { limit, type })) }] }));
+    s.tool("notion_page", "Get a Notion page with its child blocks.", { page_id: z.string(), ...profileParam },
+        async ({ page_id, profile }) => ({ content: [{ type: "text", text: json(await notion.getPage(getNotionAuth(profile), page_id)) }] }));
+    s.tool("notion_page_content", "Get a Notion page's content as readable markdown.", { page_id: z.string(), ...profileParam },
+        async ({ page_id, profile }) => ({ content: [{ type: "text", text: await notion.getPageContent(getNotionAuth(profile), page_id) }] }));
+    s.tool("notion_block", "Get a specific Notion block.", { block_id: z.string(), ...profileParam },
+        async ({ block_id, profile }) => ({ content: [{ type: "text", text: json(await notion.getBlock(getNotionAuth(profile), block_id)) }] }));
+    s.tool("notion_create_page", "Create a new Notion page.", { parent_id: z.string(), title: z.string(), content: z.string().optional(), ...profileParam },
+        async ({ parent_id, title, content, profile }) => ({ content: [{ type: "text", text: json(await notion.createPage(getNotionAuth(profile), parent_id, title, content)) }] }));
+    s.tool("notion_append", "Append a block to a Notion page.", { page_id: z.string(), text: z.string(), type: z.enum(["text", "header", "sub_header", "bulleted_list", "numbered_list", "to_do", "toggle", "quote", "code", "divider"]).optional(), ...profileParam },
+        async ({ page_id, text, type, profile }) => ({ content: [{ type: "text", text: json(await notion.appendBlock(getNotionAuth(profile), page_id, text, type || "text")) }] }));
+    s.tool("notion_update_block", "Update the text of a Notion block.", { block_id: z.string(), text: z.string(), ...profileParam },
+        async ({ block_id, text, profile }) => ({ content: [{ type: "text", text: json(await notion.updateBlock(getNotionAuth(profile), block_id, text)) }] }));
+    s.tool("notion_delete_block", "Delete a Notion block.", { block_id: z.string(), ...profileParam },
+        async ({ block_id, profile }) => { await notion.deleteBlock(getNotionAuth(profile), block_id); return { content: [{ type: "text", text: "Block deleted." }] }; });
+    s.tool("notion_database", "Query a Notion database.", { collection_id: z.string(), view_id: z.string(), limit: z.number().optional(), query: z.string().optional(), ...profileParam },
+        async ({ collection_id, view_id, limit, query, profile }) => ({ content: [{ type: "text", text: json(await notion.queryDatabase(getNotionAuth(profile), collection_id, view_id, { limit, query })) }] }));
+    s.tool("notion_recent", "Get recently visited Notion pages.", { limit: z.number().optional(), ...profileParam },
+        async ({ limit, profile }) => ({ content: [{ type: "text", text: json(await notion.getRecentPages(getNotionAuth(profile), limit || 20)) }] }));
+
+    // Discord
+    s.tool("discord_me", "Get your Discord profile.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await discord.getMe(getDiscordAuth(profile))) }] }));
+    s.tool("discord_guilds", "List your Discord servers.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await discord.listGuilds(getDiscordAuth(profile))) }] }));
+    s.tool("discord_guild", "Get Discord server details.", { guild_id: z.string(), ...profileParam },
+        async ({ guild_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getGuild(getDiscordAuth(profile), guild_id)) }] }));
+    s.tool("discord_channels", "List channels in a Discord server.", { guild_id: z.string(), ...profileParam },
+        async ({ guild_id, profile }) => ({ content: [{ type: "text", text: json(await discord.listChannels(getDiscordAuth(profile), guild_id)) }] }));
+    s.tool("discord_messages", "Read messages from a Discord channel.", { channel_id: z.string(), limit: z.number().optional(), ...profileParam },
+        async ({ channel_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.readMessages(getDiscordAuth(profile), channel_id, limit || 50)) }] }));
+    s.tool("discord_send", "Send a message to a Discord channel.", { channel_id: z.string(), content: z.string(), ...profileParam },
+        async ({ channel_id, content, profile }) => ({ content: [{ type: "text", text: json(await discord.sendMessage(getDiscordAuth(profile), channel_id, content)) }] }));
+    s.tool("discord_channel", "Get Discord channel info.", { channel_id: z.string(), ...profileParam },
+        async ({ channel_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getChannel(getDiscordAuth(profile), channel_id)) }] }));
+    s.tool("discord_search", "Search messages in a Discord server.", { guild_id: z.string(), query: z.string(), limit: z.number().optional(), ...profileParam },
+        async ({ guild_id, query, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.searchMessages(getDiscordAuth(profile), guild_id, query, limit || 25)) }] }));
+    s.tool("discord_dms", "List your Discord DM channels.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await discord.listDMs(getDiscordAuth(profile))) }] }));
+    s.tool("discord_read_dm", "Read DM messages.", { channel_id: z.string(), limit: z.number().optional(), ...profileParam },
+        async ({ channel_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.readDMs(getDiscordAuth(profile), channel_id, limit || 50)) }] }));
+    s.tool("discord_send_dm", "Send a DM to a user.", { user_id: z.string(), content: z.string(), ...profileParam },
+        async ({ user_id, content, profile }) => ({ content: [{ type: "text", text: json(await discord.sendDM(getDiscordAuth(profile), user_id, content)) }] }));
+    s.tool("discord_react", "Add a reaction.", { channel_id: z.string(), message_id: z.string(), emoji: z.string(), ...profileParam },
+        async ({ channel_id, message_id, emoji, profile }) => { await discord.addReaction(getDiscordAuth(profile), channel_id, message_id, emoji); return { content: [{ type: "text", text: "Reaction added." }] }; });
+    s.tool("discord_unreact", "Remove a reaction.", { channel_id: z.string(), message_id: z.string(), emoji: z.string(), ...profileParam },
+        async ({ channel_id, message_id, emoji, profile }) => { await discord.removeReaction(getDiscordAuth(profile), channel_id, message_id, emoji); return { content: [{ type: "text", text: "Reaction removed." }] }; });
+    s.tool("discord_members", "List server members.", { guild_id: z.string(), limit: z.number().optional(), ...profileParam },
+        async ({ guild_id, limit, profile }) => ({ content: [{ type: "text", text: json(await discord.getGuildMembers(getDiscordAuth(profile), guild_id, limit || 100)) }] }));
+    s.tool("discord_user", "Get a Discord user's profile.", { user_id: z.string(), ...profileParam },
+        async ({ user_id, profile }) => ({ content: [{ type: "text", text: json(await discord.getUserProfile(getDiscordAuth(profile), user_id)) }] }));
+
+    // Google Drive
+    s.tool("gdrive_connect", "Connect a Google Drive account via OAuth.", { profile: z.string().optional() },
+        async ({ profile }) => {
+            const authUrl = `http://127.0.0.1:${httpPort}/gdrive/auth${profile ? `?profile=${profile}` : ""}`;
+            try { await browserCommand("navigate", { url: authUrl }); } catch {}
+            const storageKey = profileKey("gdrive", profile);
+            const deadline = Date.now() + 120000;
+            while (Date.now() < deadline) { await new Promise(r => setTimeout(r, 2000)); const c = memCredentials.get(storageKey); if (c?.refresh_token) return { content: [{ type: "text", text: `Google Drive connected${profile ? ` as "${profile}"` : ""}.` }] }; }
+            return { content: [{ type: "text", text: `Timed out. Visit ${authUrl} manually.` }] };
+        });
+    s.tool("gdrive_files", "List files in Google Drive.", { query: z.string().optional(), folder_id: z.string().optional(), page_size: z.number().optional(), order_by: z.string().optional(), ...profileParam },
+        async ({ query, folder_id, page_size, order_by, profile }) => ({ content: [{ type: "text", text: json(await gdrive.listFiles(await getGDriveAuth(profile), { query, folderId: folder_id, pageSize: page_size, orderBy: order_by })) }] }));
+    s.tool("gdrive_file", "Get file metadata.", { file_id: z.string(), ...profileParam },
+        async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFile(await getGDriveAuth(profile), file_id)) }] }));
+    s.tool("gdrive_search", "Search files by name.", { query: z.string(), page_size: z.number().optional(), ...profileParam },
+        async ({ query, page_size, profile }) => ({ content: [{ type: "text", text: json(await gdrive.searchFiles(await getGDriveAuth(profile), query, page_size)) }] }));
+    s.tool("gdrive_read", "Read file content.", { file_id: z.string(), ...profileParam },
+        async ({ file_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.getFileContent(await getGDriveAuth(profile), file_id)) }] }));
+    s.tool("gdrive_create", "Create a file.", { name: z.string(), content: z.string(), mime_type: z.string().optional(), folder_id: z.string().optional(), ...profileParam },
+        async ({ name, content, mime_type, folder_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.createFile(await getGDriveAuth(profile), name, content, mime_type, folder_id)) }] }));
+    s.tool("gdrive_update", "Update a file's content.", { file_id: z.string(), content: z.string(), mime_type: z.string().optional(), ...profileParam },
+        async ({ file_id, content, mime_type, profile }) => ({ content: [{ type: "text", text: json(await gdrive.updateFile(await getGDriveAuth(profile), file_id, content, mime_type)) }] }));
+    s.tool("gdrive_delete", "Move a file to trash.", { file_id: z.string(), ...profileParam },
+        async ({ file_id, profile }) => { await gdrive.deleteFile(await getGDriveAuth(profile), file_id); return { content: [{ type: "text", text: "File trashed." }] }; });
+    s.tool("gdrive_create_folder", "Create a folder.", { name: z.string(), parent_id: z.string().optional(), ...profileParam },
+        async ({ name, parent_id, profile }) => ({ content: [{ type: "text", text: json(await gdrive.createFolder(await getGDriveAuth(profile), name, parent_id)) }] }));
+    s.tool("gdrive_shared_drives", "List shared drives.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.listSharedDrives(await getGDriveAuth(profile))) }] }));
+    s.tool("gdrive_quota", "Get storage quota.", { ...profileParam },
+        async ({ profile }) => ({ content: [{ type: "text", text: json(await gdrive.getStorageQuota(await getGDriveAuth(profile))) }] }));
 
     // Slack
     s.tool("slack_channels", "List Slack channels.", { ...profileParam },
@@ -1555,6 +3234,105 @@ function registerAllTools(s: McpServer) {
             return { content: [{ type: "text", text: json({ generated_at: new Date().toISOString(), filter: { service, profile }, ...summary }) }] };
         });
 
+    // Cross-Platform Content Repurposer
+    s.tool("repurpose_content", "Repurpose content between LinkedIn and Twitter. Adapts formatting, length, tone, and hashtags.", {
+        text: z.string(), from: z.enum(["linkedin", "twitter"]), to: z.enum(["linkedin", "twitter"]),
+        tone: z.enum(["professional", "casual", "thought_leader", "storytelling"]).optional(),
+        include_hashtags: z.boolean().optional(),
+    }, async ({ text, from, to, tone, include_hashtags }) => {
+        if (from === to) return { content: [{ type: "text", text: "Source and target are the same." }] };
+        const hashtagsEnabled = include_hashtags !== false;
+        const result: any = { original: { platform: from, text, char_count: text.length }, repurposed: { platform: to } };
+        if (from === "linkedin" && to === "twitter") {
+            const sentences = text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).filter(s => s.trim());
+            let tweet = (sentences[0] || text.slice(0, 275)).replace(/^[🔹🔸▶️➡️•\-\d+.]\s*/gm, "").replace(/#\w+\s*/g, "").replace(/\s+/g, " ").trim();
+            if (tweet.length > 280) tweet = tweet.slice(0, 275) + "...";
+            const threadTweets: string[] = []; let cur = "";
+            for (const s of sentences) { const c = s.replace(/#\w+\s*/g, "").trim(); if (!c) continue; if ((cur + " " + c).trim().length <= 270) { cur = (cur + " " + c).trim(); } else { if (cur) threadTweets.push(cur); cur = c.length > 270 ? c.slice(0, 267) + "..." : c; } }
+            if (cur) threadTweets.push(cur);
+            if (hashtagsEnabled) { const tags = extractHashtags(text, "twitter"); if (tags.length > 0) { const ts = " " + tags.slice(0, 3).join(" "); if (tweet.length + ts.length <= 280) tweet += ts; } }
+            result.repurposed.single_tweet = { text: tweet, char_count: tweet.length };
+            if (threadTweets.length > 1) result.repurposed.thread = threadTweets.map((t, i) => ({ tweet_number: i + 1, text: `${i + 1}/${threadTweets.length} ${t}`, char_count: t.length }));
+        } else {
+            const clean = text.replace(/@\w+/g, "").replace(/https?:\/\/\S+/g, "").trim();
+            const t = tone || "professional";
+            let post = t === "thought_leader" ? `${clean}\n\nHere's what most people miss about this:\n\nWhat's your take?`
+                : t === "storytelling" ? `Something caught my attention today.\n\n${clean}\n\nThe lesson? Sometimes the simplest observations lead to the deepest insights.`
+                : t === "casual" ? `${clean}\n\nThoughts? 👇`
+                : `${clean}\n\nThis is an important point that deserves more attention.\n\nWhat are your thoughts?`;
+            if (hashtagsEnabled) { const tags = extractHashtags(text, "linkedin"); if (tags.length > 0) post += "\n\n" + tags.slice(0, 5).join(" "); }
+            result.repurposed.post = { text: post, char_count: post.length };
+            result.repurposed.tone = t;
+        }
+        return { content: [{ type: "text", text: json(result) }] };
+    });
+
+    // Cross-Platform Workflows
+    s.tool("meeting_prep", "Prepare for a meeting by pulling LinkedIn profiles of all attendees from a Google Calendar event.", {
+        event_id: z.string(), calendar_id: z.string().optional(), gcal_profile: z.string().optional(), linkedin_profile: z.string().optional(),
+    }, async ({ event_id, calendar_id, gcal_profile, linkedin_profile }) => {
+        const calAuth = await getGCalAuth(gcal_profile);
+        const event = await gcal.getEvent(calAuth, calendar_id || "primary", event_id);
+        const attendees = event.attendees || [];
+        if (attendees.length === 0) return { content: [{ type: "text", text: json({ event: { summary: event.summary, start: event.start }, attendees: [], note: "No attendees." }) }] };
+        const liAuth = getLinkedInAuth(linkedin_profile);
+        const profiles: any[] = [];
+        for (const a of attendees) {
+            const name = a.displayName || (a.email || "").split("@")[0];
+            const p: any = { email: a.email, name, responseStatus: a.responseStatus };
+            if (name && name !== a.email) { try { const r = await linkedin.searchPeople(liAuth, name, 3); if (r.length > 0) p.linkedin = { name: `${r[0].firstName || ""} ${r[0].lastName || ""}`.trim(), headline: r[0].headline, profileUrl: r[0].publicId ? `https://linkedin.com/in/${r[0].publicId}` : null }; } catch {} }
+            profiles.push(p);
+        }
+        return { content: [{ type: "text", text: json({ event: { summary: event.summary, start: event.start, end: event.end, location: event.location }, attendee_count: profiles.length, attendees: profiles }) }] };
+    });
+    s.tool("smart_inbox", "Unified notification inbox across all connected platforms.", { github_profile: z.string().optional(), linkedin_profile: z.string().optional(), gcal_profile: z.string().optional(), gmail_profile: z.string().optional() },
+        async ({ github_profile, linkedin_profile, gcal_profile, gmail_profile }) => {
+            const inbox: any = { timestamp: new Date().toISOString(), sections: {} };
+            try { const ghAuth = getGitHubAuth(github_profile); const n = await github.getNotifications(ghAuth, 10, false); inbox.sections.github = { count: n.length, items: n.map((i: any) => ({ title: i.subject?.title, type: i.subject?.type, repo: i.repository?.full_name, reason: i.reason })) }; } catch (e: any) { inbox.sections.github = { error: e.message }; }
+            try { const liAuth = getLinkedInAuth(linkedin_profile); const c = await linkedin.getConversations(liAuth, 5); const u = (c.conversations || []).filter((x: any) => x.unreadCount > 0); inbox.sections.linkedin = { unread: u.length, items: u.map((x: any) => ({ from: x.participants?.map((p: any) => p.name).join(", "), preview: x.lastMessage?.slice(0, 100) })) }; } catch (e: any) { inbox.sections.linkedin = { error: e.message }; }
+            try { const calAuth = await getGCalAuth(gcal_profile); const now = new Date(); const eod = new Date(now); eod.setHours(23,59,59); const ev = await gcal.listEvents(calAuth, "primary", { timeMin: now.toISOString(), timeMax: eod.toISOString(), maxResults: 5 }); inbox.sections.calendar = { remaining_today: ev.length, items: ev.map((e: any) => ({ summary: e.summary, start: e.start?.dateTime || e.start?.date })) }; } catch (e: any) { inbox.sections.calendar = { error: e.message }; }
+            try { const gmAuth = await getGmailAuth(gmail_profile); const r = await gmail.listMessages(gmAuth, { query: "is:unread", maxResults: 10 }); const msgs = r.messages || []; inbox.sections.gmail = { unread: msgs.length, items: msgs.map((m: any) => ({ from: m.from, subject: m.subject, snippet: m.snippet })) }; } catch (e: any) { inbox.sections.gmail = { error: e.message }; }
+            return { content: [{ type: "text", text: json(inbox) }] };
+        });
+    s.tool("contact_enrich", "Enrich a contact by searching across LinkedIn, Twitter, GitHub, and Notion.", { name: z.string().optional(), email: z.string().optional(), linkedin_profile: z.string().optional() },
+        async ({ name, email, linkedin_profile }) => {
+            if (!name && !email) return { content: [{ type: "text", text: "Provide a name or email." }] };
+            const q = name || (email ? email.split("@")[0].replace(/[._]/g, " ") : "");
+            const r: any = { query: { name, email }, profiles: {} };
+            try { const liAuth = getLinkedInAuth(linkedin_profile); const p = await linkedin.searchPeople(liAuth, q, 5); r.profiles.linkedin = p.map((x: any) => ({ name: `${x.firstName || ""} ${x.lastName || ""}`.trim(), headline: x.headline, location: x.location, url: x.publicId ? `https://linkedin.com/in/${x.publicId}` : null })); } catch (e: any) { r.profiles.linkedin = { error: e.message }; }
+            try { const ghAuth = getGitHubAuth(); const u = await github.searchUsers(ghAuth, q, 5); r.profiles.github = u.map((x: any) => ({ login: x.login, html_url: x.html_url })); } catch (e: any) { r.profiles.github = { error: e.message }; }
+            try { const nAuth = getNotionAuth(); const p = await notion.search(nAuth, q, { limit: 3 }); if (p.length > 0) r.profiles.notion = p.map((x: any) => ({ title: x.title, url: x.url })); } catch {}
+            return { content: [{ type: "text", text: json(r) }] };
+        });
+    s.tool("content_calendar", "Manage a cross-platform content calendar.", {
+        action: z.enum(["create_draft", "list_drafts", "schedule", "list_scheduled", "mark_published"]),
+        text: z.string().optional(), platform: z.enum(["linkedin", "twitter", "both"]).optional(),
+        draft_id: z.number().optional(), schedule_time: z.string().optional(), gcal_profile: z.string().optional(),
+    }, async ({ action, text, platform, draft_id, schedule_time, gcal_profile }) => {
+        const cn = "content_calendar";
+        try { await db.createCollection(cn, "Content calendar", [{ name: "text", type: "text" }, { name: "platform", type: "text" }, { name: "status", type: "text" }, { name: "scheduled_at", type: "text" }, { name: "published_at", type: "text" }, { name: "cal_event_id", type: "text" }]); } catch {}
+        if (action === "create_draft") { if (!text) return { content: [{ type: "text", text: "Provide text." }] }; const { id } = db.collectionInsert(cn, { text, platform: platform || "both", status: "draft", scheduled_at: "", published_at: "", cal_event_id: "" }); return { content: [{ type: "text", text: json({ id, status: "draft" }) }] }; }
+        if (action === "list_drafts") return { content: [{ type: "text", text: json(db.collectionQuery(cn, { where: { status: "draft" } })) }] };
+        if (action === "schedule") { if (!draft_id || !schedule_time) return { content: [{ type: "text", text: "Provide draft_id and schedule_time." }] }; db.collectionUpdate(cn, draft_id, { status: "scheduled", scheduled_at: schedule_time }); return { content: [{ type: "text", text: json({ draft_id, status: "scheduled", scheduled_at: schedule_time }) }] }; }
+        if (action === "list_scheduled") return { content: [{ type: "text", text: json(db.collectionQuery(cn, { where: { status: "scheduled" } })) }] };
+        if (action === "mark_published") { if (!draft_id) return { content: [{ type: "text", text: "Provide draft_id." }] }; db.collectionUpdate(cn, draft_id, { status: "published", published_at: new Date().toISOString() }); return { content: [{ type: "text", text: json({ draft_id, status: "published" }) }] }; }
+        return { content: [{ type: "text", text: "Unknown action." }] };
+    });
+    s.tool("pr_digest", "Get a GitHub PR digest: open PRs, review requests, failing CI.", {
+        github_profile: z.string().optional(), slack_profile: z.string().optional(), slack_channel: z.string().optional(), repos: z.array(z.string()).optional(),
+    }, async ({ github_profile, slack_profile, slack_channel, repos }) => {
+        const ghAuth = getGitHubAuth(github_profile);
+        const digest: any = { timestamp: new Date().toISOString(), sections: {} };
+        let repoList = repos || [];
+        if (repoList.length === 0) { try { const r = await github.listMyRepos(ghAuth, 10, "pushed"); repoList = r.map((x: any) => x.name); } catch {} }
+        try { const n = await github.getNotifications(ghAuth, 20, false); const prn = n.filter((x: any) => x.subject?.type === "PullRequest"); digest.sections.review_requests = { count: prn.length, items: prn.slice(0, 10).map((x: any) => ({ title: x.subject?.title, repo: x.repository?.full_name, reason: x.reason })) }; } catch (e: any) { digest.sections.review_requests = { error: e.message }; }
+        const allPRs: any[] = [];
+        for (const repo of repoList.slice(0, 5)) { const [o, n] = repo.includes("/") ? repo.split("/") : ["", repo]; try { const on = o || (await github.getAuthenticatedUser(ghAuth)).login; const prs = await github.listPRs(ghAuth, on, n, { state: "open", count: 10 }); for (const pr of prs) allPRs.push({ repo: `${on}/${n}`, number: pr.number, title: pr.title, author: pr.user?.login, draft: pr.draft }); } catch {} }
+        digest.sections.open_prs = { count: allPRs.length, items: allPRs };
+        if (slack_channel) { try { const sa = getSlackAuth(slack_profile); const lines = [`*🔔 PR Digest*\n*Open PRs (${allPRs.length}):*`]; for (const pr of allPRs.slice(0, 5)) lines.push(`• ${pr.repo}#${pr.number}: ${pr.title}`); await slack.postMessage(sa, slack_channel, lines.join("\n")); digest.slack_posted = true; } catch (e: any) { digest.slack_error = e.message; } }
+        return { content: [{ type: "text", text: json(digest) }] };
+    });
+
     // Dynamic tools
     s.tool("create_tool", "Create a new MCP tool that persists across restarts.", {
         name: z.string(), description: z.string(),
@@ -1565,6 +3343,76 @@ function registerAllTools(s: McpServer) {
         registerDynamicTool(name, description, params_schema, code);
         await server.server.sendToolListChanged();
         return { content: [{ type: "text", text: `Tool "${name}" created and registered.` }] };
+    });
+    s.tool("discover_api", "Discover a website's internal API by navigating and capturing network requests.", {
+        url: z.string().describe("URL to navigate to"),
+        service: z.string().optional().describe("Service name for auth (auto-detected from URL if omitted)"),
+        filters: z.array(z.string()).optional().describe("URL substrings to capture"),
+        wait_seconds: z.number().optional().describe("Wait time for requests (default: 5s, max: 15s)"),
+    }, async ({ url, service, filters, wait_seconds }) => {
+        if (!isBridgeConnected()) return { content: [{ type: "text", text: "Browser extension not connected." }] };
+        const results: string[] = [];
+        const domain = service || new URL(url).hostname;
+        results.push(`## Extracting auth from ${domain}...`);
+        try {
+            const authResult = await browserCommand("extract_auth", { service: domain });
+            const creds: Record<string, string> = {};
+            for (const [key, value] of Object.entries(authResult)) { if (key === "service" || !value || typeof value !== "string") continue; creds[key] = value as string; try { db.storeCredential(domain, key, value as string); } catch {} }
+            if (Array.isArray(authResult.cookies) && authResult.cookies.length > 0) { const cookieHeader = authResult.cookies.map((c: any) => `${c.name}=${c.value}`).join("; "); creds._cookies = cookieHeader; try { db.storeCredential(domain, "_cookies", cookieHeader); } catch {} }
+            storeAuthInMemory(domain, creds);
+            results.push(`✅ Auth extracted. Tokens: ${Object.keys(creds).filter(k => !k.startsWith("_")).join(", ") || "cookies only"}`);
+        } catch (err: any) { results.push(`⚠️ Auth extraction failed: ${err.message}`); }
+        results.push(`\n## Capturing network requests from ${url}...`);
+        await browserCommand("network_start_capture", { filters: filters || [] });
+        await browserCommand("navigate", { url });
+        await new Promise(r => setTimeout(r, Math.min((wait_seconds || 5), 15) * 1000));
+        const captureData = await browserCommand("network_list", { filter: undefined, limit: 200 });
+        const requests = captureData?.requests || [];
+        await browserCommand("network_stop_capture");
+        if (requests.length === 0) { results.push("❌ No requests captured."); return { content: [{ type: "text", text: results.join("\n") }] }; }
+        results.push(`✅ Captured ${requests.length} requests.\n`);
+        const apiReqs = requests.filter((r: any) => { const u = (r.url || "").toLowerCase(); return !(u.endsWith(".js") || u.endsWith(".css") || u.endsWith(".png") || u.endsWith(".jpg") || u.endsWith(".svg") || u.endsWith(".woff2") || u.endsWith(".ico") || u.includes("/static/") || u.includes("/assets/")); });
+        const dataReqs = apiReqs.filter((r: any) => { const u = (r.url || "").toLowerCase(); return u.includes("api") || u.includes("graphql") || u.includes("/v1/") || u.includes("/v2/") || u.includes("rpc") || (r.method && r.method !== "GET"); });
+        results.push("### API Endpoints:");
+        for (const r of (dataReqs.length > 0 ? dataReqs : apiReqs).slice(0, 30)) { results.push(`  [${r.id}] ${r.method || "GET"} ${r.status || "?"} ${r.url}`); }
+        results.push(`\nAuth stored under "${domain}". Use network_request_detail(id) to inspect, then create_tool() to save.`);
+        return { content: [{ type: "text", text: results.join("\n") }] };
+    });
+    s.tool("web_scrape", "Extract structured data from any URL (text, links, tables, images, meta, JSON-LD).", {
+        url: z.string(), extract: z.array(z.enum(["text", "links", "tables", "images", "meta", "structured_data", "all"])).optional(), selector: z.string().optional(),
+    }, async ({ url, extract, selector }) => {
+        if (!isBridgeConnected()) return { content: [{ type: "text", text: "Browser not connected." }] };
+        await browserCommand("navigate", { url });
+        await new Promise(r => setTimeout(r, 3000));
+        const extractAll = !extract || extract.includes("all");
+        const w = (t: string) => extractAll || extract?.includes(t as any);
+        const script = `(function(){const s=${selector?`document.querySelector(${JSON.stringify(selector)})`:'document'}||document;const r={url:location.href,title:document.title};${w("meta")?`r.meta={};const md=document.querySelector('meta[name="description"]');r.meta.description=md?md.content:'';document.querySelectorAll('meta[property^="og:"]').forEach(m=>{r.meta[m.getAttribute('property')]=m.content});`:''}${w("text")?`const ce=s.querySelector('article')||s.querySelector('main')||s.querySelector('.content')||s;const cl=ce.cloneNode(true);cl.querySelectorAll('script,style,nav,footer,header,aside').forEach(e=>e.remove());r.text=(cl.innerText||'').replace(/\\n{3,}/g,'\\n\\n').trim().slice(0,50000);r.word_count=r.text.split(/\\s+/).length;`:''}${w("links")?`const ls=[];const sn=new Set();s.querySelectorAll('a[href]').forEach(a=>{if(a.href&&!a.href.startsWith('javascript:')&&a.innerText.trim()&&!sn.has(a.href)){sn.add(a.href);ls.push({text:a.innerText.trim().slice(0,200),href:a.href})}});r.links=ls.slice(0,200);`:''}${w("tables")?`r.tables=[];s.querySelectorAll('table').forEach((t,i)=>{const rows=[];t.querySelectorAll('tr').forEach(tr=>{const c=[];tr.querySelectorAll('th,td').forEach(td=>c.push(td.innerText.trim()));if(c.length)rows.push(c)});if(rows.length)r.tables.push({headers:rows[0],rows:rows.slice(1,100)})});`:''}${w("images")?`r.images=[];s.querySelectorAll('img[src]').forEach(i=>{if(i.naturalWidth>50)r.images.push({src:i.src,alt:i.alt||'',w:i.naturalWidth,h:i.naturalHeight})});r.images=r.images.slice(0,50);`:''}${w("structured_data")?`r.structured_data=[];document.querySelectorAll('script[type="application/ld+json"]').forEach(s=>{try{r.structured_data.push(JSON.parse(s.textContent))}catch{}});`:''}return r})()`;
+        try { const data = await browserCommand("execute_script", { code: script }); return { content: [{ type: "text", text: json(data) }] }; }
+        catch (e: any) { try { const fb = await browserCommand("execute_script", { code: `({url:location.href,title:document.title,text:document.body.innerText.slice(0,30000)})` }); return { content: [{ type: "text", text: json({...fb, note: "Partial extraction"}) }] }; } catch { return { content: [{ type: "text", text: `Scrape failed: ${e.message}` }] }; } }
+    });
+    s.tool("diff_monitor", "Monitor any URL for changes. Stores snapshots, compares, reports diffs.", {
+        action: z.enum(["check", "list", "history", "remove"]),
+        url: z.string().optional(), name: z.string().optional(), selector: z.string().optional(), extract: z.enum(["text", "html", "json"]).optional(),
+    }, async ({ action, url, name, selector, extract: ext }) => {
+        const CN = "diff_monitor";
+        try { db.createCollection(CN, "Page change monitoring", [{ name: "monitor_name", type: "text" },{ name: "url", type: "text" },{ name: "selector", type: "text" },{ name: "extract_type", type: "text" },{ name: "content_hash", type: "text" },{ name: "content", type: "text" },{ name: "checked_at", type: "text" },{ name: "changed", type: "boolean" },{ name: "diff_summary", type: "text" }]); } catch {}
+        if (action === "list") { const all = db.collectionQuery(CN, { orderBy: "checked_at DESC", limit: 200 }) as any[]; const m = new Map<string,any>(); for (const r of all) { if (!m.has(r.monitor_name)) m.set(r.monitor_name, { name: r.monitor_name, url: r.url, last_checked: r.checked_at, snapshots: 0 }); m.get(r.monitor_name).snapshots++; } return { content: [{ type: "text", text: json([...m.values()]) }] }; }
+        if (action === "history") { if (!name) return { content: [{ type: "text", text: "Provide name." }] }; const s = db.collectionQuery(CN, { where: { monitor_name: name }, orderBy: "checked_at DESC", limit: 20 }) as any[]; return { content: [{ type: "text", text: json(s.map(x => ({ checked_at: x.checked_at, changed: x.changed, diff: x.diff_summary, preview: (x.content||"").slice(0,200) }))) }] }; }
+        if (action === "remove") { if (!name) return { content: [{ type: "text", text: "Provide name." }] }; const rows = db.collectionQuery(CN, { where: { monitor_name: name } }) as any[]; for (const r of rows) { try { db.collectionDelete(CN, r.id); } catch {} } return { content: [{ type: "text", text: `Removed "${name}" (${rows.length} snapshots).` }] }; }
+        if (!url) return { content: [{ type: "text", text: "Provide URL." }] };
+        const mn = name || new URL(url).hostname + new URL(url).pathname;
+        let content = "";
+        try {
+            if ((ext || "text") === "json") { const r = await browserCommand("browser_fetch", { url, method: "GET", credentials: "include" }); content = typeof r.body === "string" ? r.body : JSON.stringify(r.body); }
+            else { await browserCommand("navigate", { url }); await new Promise(r => setTimeout(r, 3000)); const sc = selector ? `(document.querySelector(${JSON.stringify(selector)})||document.body).${ext==="html"?"innerHTML":"innerText"}` : `document.body.${ext==="html"?"innerHTML":"innerText"}`; content = (await browserCommand("execute_script", { code: sc })) || ""; if (typeof content !== "string") content = JSON.stringify(content); }
+        } catch (e: any) { return { content: [{ type: "text", text: `Fetch failed: ${e.message}` }] }; }
+        let h = 0; for (let i = 0; i < content.length; i++) h = ((h << 5) - h + content.charCodeAt(i)) | 0;
+        const ch = h.toString(36);
+        const prev = (db.collectionQuery(CN, { where: { monitor_name: mn }, orderBy: "checked_at DESC", limit: 1 }) as any[])[0];
+        let changed = true, diff = "First snapshot — baseline.";
+        if (prev) { changed = prev.content_hash !== ch; diff = changed ? "Content changed." : "No changes."; }
+        db.collectionInsert(CN, { monitor_name: mn, url, selector: selector||"", extract_type: ext||"text", content_hash: ch, content: content.slice(0, 50000), checked_at: new Date().toISOString(), changed, diff_summary: diff });
+        return { content: [{ type: "text", text: json({ monitor: mn, url, changed, diff, preview: content.slice(0, 500), checked_at: new Date().toISOString() }) }] };
     });
     s.tool("list_custom_tools", "List all custom tools.", {}, async () => {
         const tools = db.getCustomTools();
