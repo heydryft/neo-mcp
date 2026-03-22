@@ -161,82 +161,33 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
     };
 }
 
-/** Get the authenticated user's own posts with engagement metrics.
- *  Uses the feed endpoint and filters by author URN since profileUpdatesV2 is deprecated. */
+/** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    const me = await getMe(auth);
-    // Get the member URN to filter feed results — try multiple URN fields
-    const memberUrn = me.objectUrn || me.entityUrn || "";
-    // Also build an fsd_profile URN for matching against feed authorUrns
-    const fsdUrn = me.fsdProfileUrn || "";
+    const meData = await linkedinApi(auth, `/me`);
+    const publicId = meData.miniProfile?.publicIdentifier || meData.publicIdentifier || "";
+    if (!publicId) throw new Error("Could not determine public ID for current user");
 
-    // Fetch a larger feed slice sorted by recency, then filter to own posts
-    const feedData = await linkedinApi(auth, `/feed/updatesV2`, {
-        params: {
-            count: String(Math.min(count * 5, 100)),
-            start: "0",
-            q: "chronFeed",
-        },
-        headers: { "Accept": "application/vnd.linkedin.normalized+json+2.1" },
-    });
-
-    const allPosts = extractPosts(feedData, count * 5);
-
-    if (memberUrn || fsdUrn) {
-        // Filter to only the current user's posts by matching any URN variant
-        const mine = allPosts.filter(p => {
-            if (!p.authorUrn) return false;
-            return p.authorUrn.includes(memberUrn)
-                || (fsdUrn && p.authorUrn.includes(fsdUrn))
-                || p.authorUrn.includes(me.miniProfileId);
-        });
-        if (mine.length > 0) return mine.slice(0, count);
-    }
-
-    // Fallback: return all feed posts if we can't identify own posts
-    return allPosts.slice(0, count);
+    return fetchUserPosts(auth, publicId, count);
 }
 
-/** Get a specific user's posts by vanity name.
- *  Uses the feed endpoint filtered by the target user's URN. */
+/** Get a specific user's posts by vanity name */
 export async function getProfilePosts(auth: LinkedInAuth, vanityName: string, count = 20): Promise<any[]> {
-    // Resolve vanity name to profile URN
-    const profileData = await linkedinApi(auth, `/identity/dash/profiles`, {
-        params: {
-            q: "memberIdentity",
-            memberIdentity: vanityName,
-            decorationId: "com.linkedin.voyager.dash.deco.identity.profile.FullProfile-91",
-        },
-    });
-    const included: any[] = profileData.included || [];
-    const profileEntity = included.find((e: any) =>
-        e.$type?.includes("Profile") && (e.entityUrn || e.objectUrn)
-    );
-    if (!profileEntity) throw new Error(`Could not find profile for "${vanityName}"`);
+    return fetchUserPosts(auth, vanityName, count);
+}
 
-    const targetUrn = profileEntity.entityUrn || profileEntity.objectUrn || "";
-    const targetId = profileEntity.publicIdentifier || vanityName;
-
-    // Fetch feed and filter — this may not return many posts for other users
-    // since the feed is personalized. For best results, use network_capture
-    // to find the exact endpoint LinkedIn uses on the Activity tab.
-    const feedData = await linkedinApi(auth, `/feed/updatesV2`, {
+/** Fetch a user's posts via /feed/updates with memberShareFeed filter */
+async function fetchUserPosts(auth: LinkedInAuth, publicId: string, count: number): Promise<any[]> {
+    const data = await linkedinApi(auth, `/feed/updates`, {
         params: {
-            count: String(Math.min(count * 5, 100)),
+            profileId: publicId,
+            q: "memberShareFeed",
+            moduleKey: "member-share",
+            count: String(Math.min(count, 100)),
             start: "0",
-            q: "chronFeed",
         },
-        headers: { "Accept": "application/vnd.linkedin.normalized+json+2.1" },
     });
 
-    const allPosts = extractPosts(feedData, count * 5);
-    const theirs = allPosts.filter(p =>
-        p.authorUrn && (p.authorUrn.includes(targetUrn) || p.authorUrn.includes(targetId))
-    );
-
-    if (theirs.length > 0) return theirs.slice(0, count);
-
-    return []; // No posts found for this user in the feed
+    return extractPosts(data, count);
 }
 
 /** Get the user's feed */
@@ -321,17 +272,22 @@ function extractPosts(data: any, max: number): any[] {
         const socialCounts = socialDetail?.totalSocialActivityCounts || {};
 
         // Resolve author from the actor reference
-        const actorUrn = item["*actor"] || item.actor;
-        const actor = actorUrn ? byUrn.get(actorUrn) : null;
+        const actorRef = item["*actor"] || item.actor;
+        const actor = (typeof actorRef === "string") ? byUrn.get(actorRef) : actorRef;
         const authorName = actor
             ? `${actor.firstName || ""} ${actor.lastName || ""}`.trim()
                 || actor.title?.text
+                || actor.name?.text
                 || ""
             : "";
+        const authorUrn = actor?.entityUrn || actor?.objectUrn
+            || (typeof actorRef === "string" ? actorRef : "")
+            || "";
 
         posts.push({
             text: commentary.slice(0, 1000),
             author: authorName || undefined,
+            authorUrn: authorUrn || undefined,
             created: item.createdAt ? new Date(item.createdAt).toISOString() : null,
             likes: socialCounts.numLikes || 0,
             comments: socialCounts.numComments || 0,
