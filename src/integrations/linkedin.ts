@@ -91,8 +91,14 @@ async function linkedinApi<T = any>(
     return response.json() as Promise<T>;
 }
 
+// Cache getMe result per li_at token so we don't call /me repeatedly
+const _meCacheByToken = new Map<string, { objectUrn: string; entityUrn: string; miniProfileId: string; fsdProfileUrn: string; publicIdentifier: string }>();
+
 /** Get the authenticated user's identity (URNs + miniProfile ID + fsd_profile URN + publicIdentifier) */
 async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn: string; miniProfileId: string; fsdProfileUrn: string; publicIdentifier: string }> {
+    const cached = _meCacheByToken.get(auth.li_at);
+    if (cached) return cached;
+
     const data = await linkedinApi(auth, `/me`);
     const profile = data.miniProfile || data;
 
@@ -120,13 +126,15 @@ async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn
         fsdProfileUrn = `urn:li:fsd_profile:${miniProfileId}`;
     }
 
-    return {
+    const result = {
         objectUrn: profile.objectUrn || "",
         entityUrn,
         miniProfileId,
         fsdProfileUrn,
         publicIdentifier: profile.publicIdentifier || data.publicIdentifier || "",
     };
+    _meCacheByToken.set(auth.li_at, result);
+    return result;
 }
 
 /** Get a user's profile by vanity name (the URL slug) */
@@ -164,27 +172,14 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
 
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    const meRaw = await linkedinApi(auth, `/me`);
-    const publicId = meRaw.miniProfile?.publicIdentifier
-        || meRaw.publicIdentifier
-        || "";
-
-    if (!publicId && meRaw.included) {
-        for (const item of meRaw.included) {
-            if (item.publicIdentifier) return fetchUserPosts(auth, item.publicIdentifier, count);
-        }
-    }
-
+    const me = await getMe(auth);
+    const publicId = me.publicIdentifier;
     if (!publicId) {
-        const keys = Object.keys(meRaw).join(", ");
         throw new Error(
-            `No publicIdentifier in /me. Keys: [${keys}]. `
+            `Could not determine your vanity name from /me. `
             + `Use linkedin_profile_posts with your vanity name instead.`
         );
     }
-
-    // Log what we're about to use so timeout issues are debuggable
-    console.error(`[linkedin] getMyPosts: publicIdentifier="${publicId}"`);
     return fetchUserPosts(auth, publicId, count);
 }
 
