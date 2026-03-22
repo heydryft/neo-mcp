@@ -164,12 +164,21 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
 
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    // Use getMe which already works for other tools, then extract publicIdentifier
     const me = await getMe(auth);
     const publicId = me.publicIdentifier;
-    if (!publicId) throw new Error("Could not determine public ID for current user. Use linkedin_profile_posts with your vanity name instead.");
+    if (!publicId) {
+        throw new Error(
+            `Could not determine your LinkedIn vanity name from /me. `
+            + `objectUrn=${me.objectUrn}, entityUrn=${me.entityUrn}, miniProfileId=${me.miniProfileId}. `
+            + `Use linkedin_profile_posts with your vanity name instead.`
+        );
+    }
 
-    return fetchUserPosts(auth, publicId, count);
+    try {
+        return await fetchUserPosts(auth, publicId, count);
+    } catch (e: any) {
+        throw new Error(`getMyPosts failed with publicId="${publicId}": ${e.message}`);
+    }
 }
 
 /** Get a specific user's posts by vanity name */
