@@ -164,35 +164,27 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
 
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    // Get the raw /me response so we can inspect all possible publicIdentifier locations
     const meRaw = await linkedinApi(auth, `/me`);
-
-    // Try every known location for publicIdentifier
-    let publicId = meRaw.miniProfile?.publicIdentifier
+    const publicId = meRaw.miniProfile?.publicIdentifier
         || meRaw.publicIdentifier
         || "";
 
-    // Check included entities if top-level didn't have it
     if (!publicId && meRaw.included) {
         for (const item of meRaw.included) {
-            if (item.publicIdentifier) {
-                publicId = item.publicIdentifier;
-                break;
-            }
+            if (item.publicIdentifier) return fetchUserPosts(auth, item.publicIdentifier, count);
         }
     }
 
     if (!publicId) {
-        // Dump what we got so the user can see what /me actually returns
         const keys = Object.keys(meRaw).join(", ");
-        const miniKeys = meRaw.miniProfile ? Object.keys(meRaw.miniProfile).join(", ") : "no miniProfile";
         throw new Error(
-            `Could not find publicIdentifier in /me response. `
-            + `Top-level keys: [${keys}]. miniProfile keys: [${miniKeys}]. `
+            `No publicIdentifier in /me. Keys: [${keys}]. `
             + `Use linkedin_profile_posts with your vanity name instead.`
         );
     }
 
+    // Log what we're about to use so timeout issues are debuggable
+    console.error(`[linkedin] getMyPosts: publicIdentifier="${publicId}"`);
     return fetchUserPosts(auth, publicId, count);
 }
 
