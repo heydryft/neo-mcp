@@ -265,13 +265,44 @@ function extractPosts(data: any, max: number): any[] {
 
         if (!commentary) continue;
 
-        // Look up the socialDetail entity by URN reference.
+        // Look up social engagement counts — LinkedIn stores these in many places.
+        // Try every known location in the normalized response.
         const socialDetailUrn = item["*socialDetail"];
-        const socialDetail = socialDetailUrn
-            ? byUrn.get(socialDetailUrn)
-            : item.socialDetail;
+        const socialDetail = (socialDetailUrn ? byUrn.get(socialDetailUrn) : null)
+            || item.socialDetail
+            || {};
 
-        const socialCounts = socialDetail?.totalSocialActivityCounts || {};
+        // totalSocialActivityCounts is the primary location
+        let socialCounts = socialDetail.totalSocialActivityCounts || {};
+
+        // Some responses put counts directly on the socialDetail entity
+        if (!socialCounts.numLikes && socialDetail.numLikes !== undefined) {
+            socialCounts = socialDetail;
+        }
+
+        // Some responses use a separate *socialActivityCounts reference
+        if (!socialCounts.numLikes) {
+            const countsRef = item["*socialActivityCounts"] || socialDetail["*totalSocialActivityCounts"];
+            if (countsRef && byUrn.has(countsRef)) {
+                socialCounts = byUrn.get(countsRef);
+            }
+        }
+
+        // Last resort: scan included for a matching socialActivityCounts entity
+        if (!socialCounts.numLikes) {
+            const updateUrn = item.updateUrn || item.urn || item.entityUrn || "";
+            if (updateUrn) {
+                // LinkedIn may key social counts by the activity URN
+                const activityUrn = updateUrn.replace(":ugcPost:", ":activity:").replace(":share:", ":activity:");
+                for (const key of [`urn:li:fs_socialActivityCounts:${updateUrn}`, `urn:li:fs_socialActivityCounts:${activityUrn}`]) {
+                    const entity = byUrn.get(key);
+                    if (entity) {
+                        socialCounts = entity.totalSocialActivityCounts || entity;
+                        break;
+                    }
+                }
+            }
+        }
 
         // Resolve author from the actor reference
         const actorRef = item["*actor"] || item.actor;
