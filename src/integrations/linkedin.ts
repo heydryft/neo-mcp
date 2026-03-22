@@ -91,8 +91,8 @@ async function linkedinApi<T = any>(
     return response.json() as Promise<T>;
 }
 
-/** Get the authenticated user's identity (URNs + miniProfile ID + fsd_profile URN) */
-async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn: string; miniProfileId: string; fsdProfileUrn: string }> {
+/** Get the authenticated user's identity (URNs + miniProfile ID + fsd_profile URN + publicIdentifier) */
+async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn: string; miniProfileId: string; fsdProfileUrn: string; publicIdentifier: string }> {
     const data = await linkedinApi(auth, `/me`);
     const profile = data.miniProfile || data;
 
@@ -125,6 +125,7 @@ async function getMe(auth: LinkedInAuth): Promise<{ objectUrn: string; entityUrn
         entityUrn,
         miniProfileId,
         fsdProfileUrn,
+        publicIdentifier: profile.publicIdentifier || data.publicIdentifier || "",
     };
 }
 
@@ -163,9 +164,10 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
 
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
-    const meData = await linkedinApi(auth, `/me`);
-    const publicId = meData.miniProfile?.publicIdentifier || meData.publicIdentifier || "";
-    if (!publicId) throw new Error("Could not determine public ID for current user");
+    // Use getMe which already works for other tools, then extract publicIdentifier
+    const me = await getMe(auth);
+    const publicId = me.publicIdentifier;
+    if (!publicId) throw new Error("Could not determine public ID for current user. Use linkedin_profile_posts with your vanity name instead.");
 
     return fetchUserPosts(auth, publicId, count);
 }
