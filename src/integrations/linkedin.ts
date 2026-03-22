@@ -173,36 +173,21 @@ export async function getProfile(auth: LinkedInAuth, vanityName: string): Promis
 /** Get the authenticated user's own posts with engagement metrics */
 export async function getMyPosts(auth: LinkedInAuth, count = 20): Promise<any[]> {
     const me = await getMe(auth);
-    let publicId = me.publicIdentifier;
 
-    // /me often doesn't return publicIdentifier — resolve via dash profile using our URN
-    if (!publicId && (me.fsdProfileUrn || me.miniProfileId)) {
-        const urn = me.fsdProfileUrn || `urn:li:fsd_profile:${me.miniProfileId}`;
-        const data = await linkedinApi(auth, `/identity/dash/profiles`, {
-            params: {
-                q: "memberIdentity",
-                memberIdentity: urn,
-                decorationId: "com.linkedin.voyager.dash.deco.identity.profile.FullProfile-91",
-            },
-        });
-        const included: any[] = data.included || [];
-        const profileEntity = included.find((e: any) =>
-            e.$type?.includes("Profile") && e.publicIdentifier
-        );
-        if (profileEntity?.publicIdentifier) {
-            publicId = profileEntity.publicIdentifier;
-            // Update cache so we don't do this again
-            me.publicIdentifier = publicId;
-        }
-    }
+    // Try publicIdentifier first (vanity name), then miniProfileId, then objectUrn ID.
+    // /feed/updates accepts profileId as either vanity name or internal ID.
+    const profileId = me.publicIdentifier
+        || me.miniProfileId
+        || me.objectUrn?.split(":").pop()
+        || "";
 
-    if (!publicId) {
+    if (!profileId) {
         throw new Error(
-            `Could not determine your vanity name. `
+            `Could not determine profile ID from /me. `
             + `Use linkedin_profile_posts with your vanity name instead.`
         );
     }
-    return fetchUserPosts(auth, publicId, count);
+    return fetchUserPosts(auth, profileId, count);
 }
 
 /** Get a specific user's posts by vanity name */
